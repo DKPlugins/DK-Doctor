@@ -1,0 +1,63 @@
+name: 🚩 False positive / wrong finding
+description: dk-doctor reported a "bug" or "risk" that is actually fine in your project.
+title: "[false-positive] "
+labels: ["false-positive"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        dk-doctor's whole value is that **every line of the report is a real bug or a real risk** — never
+        noise. A false positive is a serious report for us. Thank you for flagging it.
+
+        ⚠️ **Do not attach your game's assets or source.** A redacted snippet of the relevant `data/*.json`,
+        event command, or plugin annotation is all we need.
+  - type: checkboxes
+    attributes:
+      label: Pre-flight
+      options:
+        - label: I searched existing issues and this isn't a duplicate.
+          required: true
+  - type: input
+    attributes:
+      label: Rule
+      description: Which rule produced the finding? (the id on the report line, e.g. `broken-transfer`, `uninitialized-symbols`)
+      placeholder: "uninitialized-symbols"
+    validations:
+      required: true
+  - type: textarea
+    attributes:
+      label: The finding (paste the report line)
+      description: Copy the exact line(s) dk-doctor printed, including the location.
+      render: shell
+    validations:
+      required: true
+  - type: textarea
+    attributes:
+      label: Why it's wrong
+      description: Why is this actually correct in your project? e.g. the switch is set by a plugin, the map is reached via a variable-transfer, the asset is loaded dynamically by code...
+    validations:
+      required: true
+  - type: textarea
+    attributes:
+      label: Relevant snippet (optional but very helpful)
+      description: The minimal `data/` fragment, event command, plugin `@param`/`registerCommand`, or script line that explains why the finding is a false positive.
+      render: javascript
+    validations:
+      required: false
+  - type: dropdown
+    attributes:
+      label: RPG Maker engine
+      options:
+        - MZ
+        - MV
+        - Not sure
+        - Other / ported project
+    validations:
+      required: true
+  - type: input
+    attributes:
+      label: Plugins involved (if any)
+      description: If a plugin is the reason this isn't a real bug, name it (and a link if it's public).
+      placeholder: "DK_Message_Busts, VisuMZ_1_BattleCore, ..."
+    validations:
+      required: false

@@ -1,0 +1,55 @@
+name: 💡 Feature or new rule request
+description: Suggest a new diagnostic rule, a new check, or an improvement.
+title: "[feature] "
+labels: ["enhancement"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        dk-doctor grows by **real reports, not imagination** — the most valuable requests describe an actual
+        bug you hit (or nearly shipped) that the analyzer could have caught for you.
+  - type: checkboxes
+    attributes:
+      label: Pre-flight
+      options:
+        - label: I searched existing issues and this isn't a duplicate.
+          required: true
+  - type: dropdown
+    attributes:
+      label: Type
+      options:
+        - New diagnostic rule (catch a class of bug)
+        - Improve an existing rule (precision / message / coverage)
+        - Output / reporting (formats, filtering, presentation)
+        - Other
+    validations:
+      required: true
+  - type: textarea
+    attributes:
+      label: The problem
+      description: What real bug or risk should dk-doctor catch, and why is it painful to find by hand today?
+      placeholder: |
+        Example: "A Skill learned by a Class at some level doesn't exist in Skills.json → crash on level-up,
+        and there's no way to spot it without playing to that level."
+    validations:
+      required: true
+  - type: textarea
+    attributes:
+      label: What the finding should look like (optional)
+      description: If you can, sketch the report line you'd want — cause + exact place.
+      placeholder: |
+        error  dangling-skill  Class #3 learning lvl 12
+               learns Skill #44, which is absent from Skills.json → crash on level-up.
+      render: shell
+    validations:
+      required: false
+  - type: dropdown
+    attributes:
+      label: Confidence this is detectable statically
+      description: dk-doctor is a static analyzer — it never runs the game. Some things are only resolvable by heuristics.
+      options:
+        - Certain — provable from the data alone
+        - Likely — needs plugin/AST heuristics
+        - Not sure
+    validations:
+      required: false

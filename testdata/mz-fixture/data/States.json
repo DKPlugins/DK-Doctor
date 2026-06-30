@@ -1,0 +1,1 @@
+[null,{"id":1,"name":"Poison","note":"","iconIndex":1,"restriction":0,"priority":50,"motion":0,"overlay":0,"removeAtBattleEnd":false,"removeByRestriction":false,"autoRemovalTiming":0,"minTurns":1,"maxTurns":1,"removeByDamage":false,"chanceByDamage":100,"removeByWalking":false,"stepsToRemove":100,"maxCoverage":100,"restrictionMessage":"","traits":[]}]

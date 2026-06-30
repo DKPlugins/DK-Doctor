@@ -1,0 +1,33 @@
+<!doctype html>
+<html lang="ru">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>dk-doctor</title>
+    <link rel="stylesheet" href="/src/styles.css" />
+  </head>
+  <body>
+    <div class="app" id="app" data-state="welcome">
+      <!-- Application top bar (the native OS window frame is above it): brand,
+           project, theme/language switchers, settings. Populated from TS. -->
+      <header class="appbar" id="appbar"></header>
+
+      <!-- Notification about an available update (shown from TS when present). -->
+      <div class="updatebar" id="updateBar"></div>
+
+      <!-- Stage: holds the active view; the finding drawer + scrim + toast sit
+           on top of the report (not the whole window). -->
+      <div class="stage" id="stage">
+        <section class="view" id="view"></section>
+        <div class="scrim" id="scrim"></div>
+        <aside class="drawer" id="drawer" aria-label="Подробности находки"></aside>
+        <div class="toast" id="toast" role="status" aria-live="polite"></div>
+      </div>
+
+      <!-- Settings: a modal on top of the entire application. -->
+      <div class="modal-scrim" id="settingsScrim"></div>
+      <aside class="settings" id="settings" aria-label="Настройки" role="dialog" aria-modal="true"></aside>
+    </div>
+    <script type="module" src="/src/main.ts"></script>
+  </body>
+</html>

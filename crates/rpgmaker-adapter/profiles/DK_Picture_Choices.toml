@@ -1,0 +1,19 @@
+# Встроенный профиль: DK_Picture_Choices (плагин автора DKPlugins).
+#
+# Плагин рисует выбор вариантов картинками: грузит их в рантайме из настраиваемой
+# папки `folder` по имени варианта (`ImageManager.loadBitmap(folder, image)`),
+# статически НЕ видимому отсюда. Поэтому файлы в этой подпапке — плагин-управляемые
+# (не сироты), даже если на них нет прямых ссылок из data-полей.
+#
+# `default = img/pictures/` намеренно НЕ срабатывает (как и у DK_Message_Busts):
+# на корне `img/pictures` картинку выбора не отличить от обычной → при стоковом
+# значении подавления нет. Подавляются только вложенные подпапки
+# (`img/pictures/choices/` и т. п.). Альтернативный вариант `img/menus/choices/`
+# нестандартен (вне сканируемых корней) и просто игнорируется.
+name = "DK_Picture_Choices"
+target = "both" # plugindesc: [MV|MZ]
+
+[[provided_subdir]]
+kind = "img/pictures"
+param = "folder"
+default = "img/pictures/"

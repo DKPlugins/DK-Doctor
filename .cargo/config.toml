@@ -1,0 +1,15 @@
+# Локальная сборка без установленных C++ Build Tools (MSVC).
+#
+# На целевой машине отсутствуют MSVC-линкер и Windows SDK, поэтому MSVC-ABI
+# собрать нельзя. Сборка идёт на самодостаточном toolchain
+# `x86_64-pc-windows-gnullvm`, который везёт собственный линкер (rust-lld) и CRT.
+# Здесь линкер для gnullvm указывается на bundled `rust-lld` напрямую (без
+# внешнего clang-драйвера, которого на машине тоже нет).
+#
+# На нормальной MSVC-машине (как в CI по умолчанию) этот блок не применяется:
+# он привязан к таргету gnullvm. Дефолтный таргет остаётся MSVC из
+# rust-toolchain.toml.
+
+[target.x86_64-pc-windows-gnullvm]
+linker = "rust-lld"
+rustflags = ["-Clinker-flavor=ld.lld"]

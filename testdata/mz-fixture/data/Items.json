@@ -1,0 +1,1 @@
+[null,{"id":1,"name":"Potion","note":"","animationId":1,"damage":{"critical":false,"elementId":0,"formula":"0","type":0,"variance":20},"effects":[{"code":21,"dataId":1,"value1":1,"value2":0},{"code":44,"dataId":99,"value1":0,"value2":0}],"itypeId":1,"price":50,"consumable":true,"scope":7,"occasion":0,"hitType":0,"repeats":1,"speed":0,"successRate":100,"tpGain":0,"iconIndex":176}]
