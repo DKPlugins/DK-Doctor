@@ -55,6 +55,12 @@ pub struct RuleCtx<'a> {
     /// command: code following the label may be reachable via a jump that bypasses the exit.
     /// An empty slice disables label tracking.
     pub label_command_codes: &'a [u16],
+    /// Codes of "no-op" commands that carry no behavior and only mark structure —
+    /// for RPG Maker this is `0`, the empty command the editor appends at the end of
+    /// every command list and every indent block (a block/list terminator). The
+    /// `dead-code-after-exit` rule skips them: such a command after an exit is not
+    /// real dead code, just the block terminator. An empty slice disables the filter.
+    pub noop_command_codes: &'a [u16],
 }
 
 impl<'a> RuleCtx<'a> {
@@ -70,6 +76,7 @@ impl<'a> RuleCtx<'a> {
             exit_command_codes: &[],
             opaque_exit_codes: &[],
             label_command_codes: &[],
+            noop_command_codes: &[],
         }
     }
 
@@ -82,6 +89,7 @@ impl<'a> RuleCtx<'a> {
             exit_command_codes,
             opaque_exit_codes: &[],
             label_command_codes: &[],
+            noop_command_codes: &[],
         }
     }
 
@@ -100,7 +108,17 @@ impl<'a> RuleCtx<'a> {
             exit_command_codes,
             opaque_exit_codes,
             label_command_codes,
+            noop_command_codes: &[],
         }
+    }
+
+    /// Sets the no-op/structural command codes (RPG Maker `0` — the block/list
+    /// terminator the editor appends). `dead-code-after-exit` skips them so a
+    /// trailing empty command after an exit is not reported as dead code. Returns
+    /// `self` for chaining onto [`Self::with_codes`].
+    pub fn with_noop_codes(mut self, noop_command_codes: &'a [u16]) -> Self {
+        self.noop_command_codes = noop_command_codes;
+        self
     }
 }
 

@@ -607,15 +607,32 @@ mod tests {
     }
 
     #[test]
-    fn script_self_switch_write_not_registered() {
-        // Self-switch writes from scripts are NOT registered (cross-event
-        // mis-attribution produced false dead-self-switch on the corpus) — the
-        // self-switch table stays untouched.
+    fn script_foreign_self_switch_write_not_registered() {
+        // A FOREIGN event id (literal 9, not this._eventId) is NOT bound: we cannot
+        // attribute it to a known event → the self-switch table stays untouched
+        // (avoids the cross-event false dead-self-switch seen on the corpus).
         let list = cmds(vec![
             json!({"code":355,"indent":0,"parameters":["$gameSelfSwitches.setValue([this._mapId, 9, 'C'], true);"]}),
         ]);
         let ir = run(&list).finish();
         assert!(ir.self_switches.entries.is_empty());
+    }
+
+    #[test]
+    fn script_current_event_self_switch_write_bound_to_scope() {
+        use dk_doctor_core::ir::SelfSwitchKey;
+        // The CURRENT-EVENT idiom binds to the script's own event scope (map1, ev1).
+        let list = cmds(vec![
+            json!({"code":355,"indent":0,"parameters":["$gameSelfSwitches.setValue([this._mapId, this._eventId, 'C'], true);"]}),
+        ]);
+        let ir = run(&list).finish();
+        let info = ir
+            .self_switches
+            .entries
+            .get(&SelfSwitchKey::new(1, 1, 'C'))
+            .expect("self-switch C bound to current event");
+        assert_eq!(info.writes.len(), 1);
+        assert!(info.reads.is_empty());
     }
 
     #[test]
@@ -880,5 +897,142 @@ var $plugins =
         assert_eq!(normalize_filename("Town.rpgmvo"), "Town");
         assert_eq!(normalize_filename("$BigSheet.png"), "$BigSheet");
         assert_eq!(normalize_filename("magic.efkefc"), "magic");
+    }
+
+    // --- Variable reads via message-text escapes (\v[n]) ---
+
+    #[test]
+    fn collect_text_var_ids_cases() {
+        use crate::interpreter::collect_text_var_ids;
+        let mut out = Vec::new();
+        collect_text_var_ids(r"HP: \v[7] / \V[8]", &mut out);
+        assert_eq!(out, vec![7, 8], "both \\v and \\V, case-insensitive");
+
+        out.clear();
+        collect_text_var_ids(r"\v[3] then \v[3] again", &mut out);
+        assert_eq!(out, vec![3], "de-duplicated within one string");
+
+        out.clear();
+        collect_text_var_ids(r"\v[\v[3]]", &mut out);
+        assert_eq!(
+            out,
+            vec![3],
+            "nested: inner literal only, outer index dynamic"
+        );
+
+        out.clear();
+        collect_text_var_ids(r"\v[0] \v[] \vx plain", &mut out);
+        assert!(out.is_empty(), "id 0 / malformed escapes ignored");
+    }
+
+    #[test]
+    fn show_text_data_reads_escaped_variable() {
+        // 101 Show Text + 401 body line embedding \v[7] twice → variable #7 read once.
+        let list = cmds(vec![
+            json!({"code":101,"indent":0,"parameters":["",0,0,2,""]}),
+            json!({"code":401,"indent":0,"parameters":[r"Score \v[7] of \v[7]"]}),
+        ]);
+        let ir = run(&list).finish();
+        assert_eq!(ir.symbols.variables.get(&7).unwrap().reads.len(), 1);
+    }
+
+    #[test]
+    fn show_choices_read_escaped_variable() {
+        // 102 choice labels array embeds \v[9].
+        let list = cmds(vec![
+            json!({"code":102,"indent":0,"parameters":[[r"Pay \v[9]", "No"],1,0,2,0]}),
+        ]);
+        let ir = run(&list).finish();
+        assert_eq!(ir.symbols.variables.get(&9).unwrap().reads.len(), 1);
+    }
+
+    // --- Variable reads via "operand by variable" slots ---
+
+    #[test]
+    fn change_hp_operand_by_variable_reads() {
+        // 311 [0,1,1,0,1,false]: operandType [3]==0 → constant, no operand read
+        // (only the actor target slot is fixed). [3]==1 → [4] is a variableId READ.
+        let constant = cmds(vec![
+            json!({"code":311,"indent":0,"parameters":[0,1,0,0,30,false]}),
+        ]);
+        assert!(
+            !run(&constant).finish().symbols.variables.contains_key(&30),
+            "constant amount is not a variable read"
+        );
+
+        let by_var = cmds(vec![
+            json!({"code":311,"indent":0,"parameters":[0,1,0,1,30,false]}),
+        ]);
+        let ir = run(&by_var).finish();
+        assert_eq!(
+            ir.symbols.variables.get(&30).unwrap().reads.len(),
+            1,
+            "operandType==1 → value slot [4] is a variable read"
+        );
+    }
+
+    #[test]
+    fn change_parameter_operand_by_variable_reads_shifted_slot() {
+        // 317: [2]=paramId, [3]=op, [4]=operandType, [5]=value/varId.
+        let list = cmds(vec![
+            json!({"code":317,"indent":0,"parameters":[0,4,2,0,1,12]}),
+        ]);
+        let ir = run(&list).finish();
+        assert_eq!(ir.symbols.variables.get(&12).unwrap().reads.len(), 1);
+    }
+
+    #[test]
+    fn change_gold_and_items_operand_by_variable() {
+        // 125 Change Gold [0]=op,[1]=operandType,[2]=value/varId.
+        let gold = cmds(vec![json!({"code":125,"indent":0,"parameters":[0,1,15]})]);
+        assert_eq!(
+            run(&gold)
+                .finish()
+                .symbols
+                .variables
+                .get(&15)
+                .unwrap()
+                .reads
+                .len(),
+            1
+        );
+        // 126 Change Items [0]=itemId,[1]=op,[2]=operandType,[3]=value/varId.
+        let items = cmds(vec![json!({"code":126,"indent":0,"parameters":[7,0,1,16]})]);
+        let ir = run(&items).finish();
+        assert_eq!(ir.symbols.variables.get(&16).unwrap().reads.len(), 1);
+        // The item DB ref is still emitted alongside the operand read.
+        assert!(ir.edges.iter().any(|r| matches!(
+            r.edge,
+            Edge::ReferencesDbId {
+                kind: DbKind::Item,
+                id: 7
+            }
+        )));
+    }
+
+    #[test]
+    fn show_picture_position_by_variable_reads() {
+        // 231 [3]=designation; ==1 → [4]/[5] are x/y variableIds READ.
+        let list = cmds(vec![
+            json!({"code":231,"indent":0,"parameters":[1,"Pic",0,1,20,21,100,100,255,0]}),
+        ]);
+        let ir = run(&list).finish();
+        assert_eq!(ir.symbols.variables.get(&20).unwrap().reads.len(), 1);
+        assert_eq!(ir.symbols.variables.get(&21).unwrap().reads.len(), 1);
+    }
+
+    #[test]
+    fn change_enemy_hp_operand_by_variable_reads() {
+        // 331 Change Enemy HP: [0]=enemyIndex,[1]=op,[2]=operandType,[3]=value/varId,
+        // [4]=allowDeath. operateValue([1],[2],[3]) → [2]==1 → [3] is a variableId READ.
+        let constant = cmds(vec![
+            json!({"code":331,"indent":0,"parameters":[0,0,0,50,false]}),
+        ]);
+        assert!(!run(&constant).finish().symbols.variables.contains_key(&50));
+        let by_var = cmds(vec![
+            json!({"code":331,"indent":0,"parameters":[0,0,1,50,false]}),
+        ]);
+        let ir = run(&by_var).finish();
+        assert_eq!(ir.symbols.variables.get(&50).unwrap().reads.len(), 1);
     }
 }

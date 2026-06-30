@@ -4,7 +4,9 @@
 //! the code is passed via [`RuleCtx::exit_command_codes`]) terminates processing.
 //! Commands after it **at the same or greater indent** up to the first indent
 //! decrease are unreachable (an indent decrease = closing the branch/block that
-//! contained the exit — the path outside stays live).
+//! contained the exit — the path outside stays live). No-op terminator commands
+//! (RPG Maker `0`, passed via [`RuleCtx::noop_command_codes`]) that the editor
+//! appends to close each block are skipped — they are structure, not dead code.
 //!
 //! The core does not interpret code semantics: it only matches the exit number
 //! supplied by the adapter, preserving engine independence.
@@ -32,6 +34,7 @@ impl Rule for DeadCodeAfterExit {
         }
         let is_exit = |code: u16| ctx.exit_command_codes.contains(&code);
         let is_label = |code: u16| ctx.label_command_codes.contains(&code);
+        let is_noop = |code: u16| ctx.noop_command_codes.contains(&code);
 
         let mut findings = Vec::new();
         for node in &ctx.ir.entities {
@@ -55,6 +58,14 @@ impl Rule for DeadCodeAfterExit {
                     // flagging rather than emit a Certain false positive.
                     if is_label(cmds[j].code) {
                         break;
+                    }
+                    // The editor appends an empty no-op command (RPG Maker `0`) at
+                    // the end of every indent block; the one closing the exit's own
+                    // block sits at the same indent. It is a structural terminator,
+                    // not dead code — skip it without flagging.
+                    if is_noop(cmds[j].code) {
+                        j += 1;
+                        continue;
                     }
                     findings.push(Finding {
                         severity: Severity::Warning,
@@ -85,6 +96,8 @@ mod tests {
 
     /// RPG Maker command codes for the test: 115 = Exit Event Processing.
     const EXIT: &[u16] = &[115];
+    /// RPG Maker no-op/terminator command code: 0 (empty command).
+    const NOOP: &[u16] = &[0];
 
     fn cmd(code: u16, indent: i32, index: u32) -> CommandMeta {
         CommandMeta {
@@ -167,5 +180,40 @@ mod tests {
         let f = DeadCodeAfterExit.run(&ctx);
         assert_eq!(f.len(), 1, "только код до метки помечается мёртвым");
         assert!(matches!(f[0].message, Msg::DeadCodeAfterExit { code: 101 }));
+    }
+
+    #[test]
+    fn trailing_noop_terminator_after_exit_is_not_flagged() {
+        // Real pattern: exit inside an If (indent 1), then the editor's empty
+        // terminator (code 0, indent 1) closing that branch, then 412 End-If
+        // (indent 0) and live code after. The terminator must NOT be flagged.
+        let ir = page_with(vec![
+            cmd(111, 0, 0), // condition
+            cmd(115, 1, 1), // exit inside the branch
+            cmd(0, 1, 2),   // block terminator (empty command) — NOT dead code
+            cmd(412, 0, 3), // End-If
+            cmd(101, 0, 4), // after the branch — LIVE
+        ]);
+        let ctx = RuleCtx::with_codes(&ir, EXIT, &[], &[]).with_noop_codes(NOOP);
+        let f = DeadCodeAfterExit.run(&ctx);
+        assert!(
+            f.is_empty(),
+            "пустой терминатор блока после выхода не должен помечаться мёртвым"
+        );
+    }
+
+    #[test]
+    fn real_dead_code_after_exit_still_flagged_past_noop() {
+        // A no-op terminator does not shield a genuinely unreachable command that
+        // follows it at the same indent: code 0 is skipped, code 250 is flagged.
+        let ir = page_with(vec![
+            cmd(115, 0, 0), // exit at top level
+            cmd(0, 0, 1),   // no-op — skipped
+            cmd(250, 0, 2), // real dead code — flagged
+        ]);
+        let ctx = RuleCtx::with_exit_codes(&ir, EXIT).with_noop_codes(NOOP);
+        let f = DeadCodeAfterExit.run(&ctx);
+        assert_eq!(f.len(), 1);
+        assert!(matches!(f[0].message, Msg::DeadCodeAfterExit { code: 250 }));
     }
 }

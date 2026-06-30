@@ -159,6 +159,34 @@ node/pnpm/rust, builds the frontend, runs `tauri build`, and uploads the bundles
 - [docs/architecture.md](docs/architecture.md) — Rust workspace, IR types, rules engine.
 - [CONTRIBUTING.md](CONTRIBUTING.md) — how to report bugs and false positives, and build from source.
 
+## FAQ
+
+**Windows warns "Windows protected your PC" / SmartScreen blocks the app — is it a virus?**
+No. The installer and `.exe` are not yet code-signed (an EV certificate is costly for a beta), so Microsoft
+SmartScreen shows an "unrecognized app" warning by default. To run it: click **More info → Run anyway**. The
+warning fades on its own as more people download the release and SmartScreen builds reputation. You can verify the
+binary yourself — the full source is in this repo and the releases are built in public CI.
+
+**Does it upload my project or send any telemetry?**
+No. The analyzer runs entirely on your machine; nothing about your project leaves it. The only optional network
+call is a launch-time check against GitHub Releases for a newer version (off unless you enable it in Settings), and
+that sends no project data.
+
+**macOS says the app is damaged / from an unidentified developer.**
+Same reason — macOS builds are ad-hoc (unsigned). Right-click the app → **Open**, or run
+`xattr -dr com.apple.quarantine dk-doctor.app` once.
+
+**It reports "no analyzable data found" on my project.**
+The `data/*.json` is likely encrypted or in a non-standard format (some engines/protectors do this). dk-doctor
+analyzes plain RPG Maker MV/MZ data; it does not decrypt projects.
+
+**It flagged a real, working thing as a bug (false positive).**
+Please report it — the rule set grows by real reports. Open an issue with the command/finding (see
+[CONTRIBUTING.md](CONTRIBUTING.md)). You can also silence a single rule with `--disable <rule>` in the CLI.
+
+**MV or MZ?**
+Both. Their `data/` formats are nearly identical and the adapter handles the differences automatically.
+
 ## License
 
 **MIT** — see [LICENSE](LICENSE). Free and open source; you may use, modify, and redistribute it.

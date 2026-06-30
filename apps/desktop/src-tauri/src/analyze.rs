@@ -23,6 +23,11 @@ const OPAQUE_EXIT_CODES: &[u16] = &[117, 355, 356, 357];
 /// Label" 119). Must match the CLI so the JSON stays identical.
 const LABEL_COMMAND_CODES: &[u16] = &[118];
 
+/// "Empty command" code (0) — the block/list terminator the editor appends. Passed to
+/// `dead-code-after-exit` so a trailing terminator after an exit is not marked dead.
+/// Must match the CLI so the JSON stays identical.
+const NOOP_COMMAND_CODES: &[u16] = &[0];
+
 /// Analysis options from the UI (mirror of the CLI flags).
 #[derive(Debug, Default, Deserialize)]
 #[serde(rename_all = "camelCase", default)]
@@ -215,7 +220,8 @@ fn run_and_render(ir: &Ir, engine: &str, lang: Lang, opts: &AnalyzeOpts) -> Stri
         EXIT_COMMAND_CODES,
         OPAQUE_EXIT_CODES,
         LABEL_COMMAND_CODES,
-    );
+    )
+    .with_noop_codes(NOOP_COMMAND_CODES);
     let mut findings = registry.run_all(&ctx);
 
     if let Some(min) = opts.min_severity.as_deref().and_then(parse_severity) {

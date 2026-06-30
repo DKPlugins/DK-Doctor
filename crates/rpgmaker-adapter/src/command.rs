@@ -38,6 +38,17 @@ impl EventCommand {
         self.parameters.get(i).and_then(Value::as_str)
     }
 
+    /// Parameter `parameters[i]` as an array of strings (e.g. the choice texts of
+    /// `102`). Non-string elements are skipped; a missing/non-array slot yields an
+    /// empty vector.
+    pub fn as_str_array(&self, i: usize) -> Vec<&str> {
+        self.parameters
+            .get(i)
+            .and_then(Value::as_array)
+            .map(|a| a.iter().filter_map(Value::as_str).collect())
+            .unwrap_or_default()
+    }
+
     /// Parameter `parameters[i]` as a JSON object (e.g. an audio object).
     pub fn as_object(&self, i: usize) -> Option<&serde_json::Map<String, Value>> {
         self.parameters.get(i).and_then(Value::as_object)

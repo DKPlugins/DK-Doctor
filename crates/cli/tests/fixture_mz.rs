@@ -14,6 +14,9 @@ const OPAQUE_CODES: &[u16] = &[117, 355, 356, 357];
 /// Command code for the «Label» marker (as in the CLI).
 const LABEL_CODES: &[u16] = &[118];
 
+/// Command code for the «empty command» block terminator (as in the CLI).
+const NOOP_CODES: &[u16] = &[0];
+
 /// Loads the fixture and runs all built-in rules.
 fn run_fixture() -> Vec<Finding> {
     let root = camino::Utf8PathBuf::from(env!("CARGO_MANIFEST_DIR"))
@@ -24,7 +27,8 @@ fn run_fixture() -> Vec<Finding> {
     let ir = load_project(&root).expect("фикстура должна загрузиться");
     assert_eq!(ir.engine, dk_doctor_core::Engine::Mz, "движок = MZ");
     let registry = Registry::with_builtin();
-    let ctx = RuleCtx::with_codes(&ir, EXIT_CODES, OPAQUE_CODES, LABEL_CODES);
+    let ctx =
+        RuleCtx::with_codes(&ir, EXIT_CODES, OPAQUE_CODES, LABEL_CODES).with_noop_codes(NOOP_CODES);
     registry.run_all(&ctx)
 }
 
@@ -136,9 +140,10 @@ fn each_planted_rule_fires_exactly() {
         Msg::OrphanAsset { name, .. } if name == "Unused"
     ));
 
-    // 8. dead-code-after-exit: commands after 115 (101 + 108 + trailing code:0).
+    // 8. dead-code-after-exit: real commands after 115 (101 + 108). The trailing
+    //    code:0 list terminator is a structural no-op and must NOT be flagged.
     let dead_code = by_rule(&findings, "dead-code-after-exit");
-    assert_eq!(dead_code.len(), 3, "три недостижимые команды после Exit");
+    assert_eq!(dead_code.len(), 2, "две недостижимые команды после Exit");
     assert!(
         dead_code
             .iter()
@@ -341,10 +346,10 @@ fn summary_counts_match() {
     //         (GhostPic + MissingArena + Outside_B) + missing-base + plugin-load-order.
     assert_eq!(report.summary.errors, 11, "11 ошибок");
     // Warnings: uninitialized-symbols + dead-variables +
-    // dead-code-after-exit ×3 + dead-self-switch + unreachable-self-switch +
+    // dead-code-after-exit ×2 + dead-self-switch + unreachable-self-switch +
     // cyclic-common-events + shadowed-page + stuck-autorun +
     // unknown-plugin-command + impossible-condition.
-    assert_eq!(report.summary.warnings, 12, "12 предупреждений");
+    assert_eq!(report.summary.warnings, 11, "11 предупреждений");
     // Info: unreachable-maps + orphan-assets + dead-common-event.
     assert_eq!(report.summary.infos, 3, "3 информационных");
     assert_eq!(report.exit_code(), 2, "код выхода 2 (есть ошибки)");

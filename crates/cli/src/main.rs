@@ -28,6 +28,11 @@ const OPAQUE_EXIT_CODES: &[u16] = &[117, 355, 356, 357];
 /// (a jump may bypass the event exit).
 const LABEL_COMMAND_CODES: &[u16] = &[118];
 
+/// RPG Maker "empty command" code (0) — the block/list terminator the editor
+/// appends at the end of every command list and indent block. Passed to
+/// `dead-code-after-exit` so a trailing terminator after an exit is not marked dead.
+const NOOP_COMMAND_CODES: &[u16] = &[0];
+
 fn main() -> ExitCode {
     let args = Args::parse();
     let lang = resolve_lang(args.lang);
@@ -70,7 +75,8 @@ fn main() -> ExitCode {
         EXIT_COMMAND_CODES,
         OPAQUE_EXIT_CODES,
         LABEL_COMMAND_CODES,
-    );
+    )
+    .with_noop_codes(NOOP_COMMAND_CODES);
     let findings = registry.run_all(&ctx);
 
     // Exit code reflects the real project state (all findings), independent of

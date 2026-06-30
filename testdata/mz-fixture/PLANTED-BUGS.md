@@ -41,7 +41,7 @@ Enemy #1, Animation #1, Tileset #1, Actor #1. Ids `#99` absent everywhere.
 | `stuck-autorun` | `Map002` / EV002 "Loop" / page1 — Autorun (`trigger:3`) gated on switch **#1**, body only `101`/`401` (text) | gated Autorun with no self-switch/switch write and no transfer → infinite autorun (soft-lock) |
 | `shadowed-page` | `Map001` / EV001 "Greeter" / page1 (needs switch **#1**+switch **#2**) shadowed by page2 (no conditions) | RM picks highest-index page whose conditions hold; page2 always active → page1 unreachable |
 | `orphan-assets` | `img/pictures/Unused.png` | present on disk, referenced nowhere (CLI: opt-in via `--orphans`) |
-| `dead-code-after-exit` | `Map001` / EV002 "Logic" / page1 — cmds after `115` Exit at indent 0 (cmd9 `101`, cmd10 `108`, cmd11 blank) | unreachable: the `115` at cmd8 ends event processing |
+| `dead-code-after-exit` | `Map001` / EV002 "Logic" / page1 — cmds after `115` Exit at indent 0 (cmd9 `101`, cmd10 `108`; cmd11 blank `0` is the list terminator, a no-op, not flagged) | unreachable: the `115` at cmd8 ends event processing |
 | `dead-self-switch` | `Map001` / EV003 "SwitchLogic" / page1 / cmd1 — `123` sets self-switch **B** | written once, never read by any page condition / `111` type 2 |
 | `unreachable-self-switch` | `Map001` / EV003 "SwitchLogic" / page2 condition — requires self-switch **D** | no `123` on EV003 ever sets D → page unreachable (plugin caveat) |
 | `dead-common-event` | `CommonEvents.json` / CE **#2 "Orphan"** | trigger None, no incoming `117` and no effect-44 reference (CLI: opt-in via `--dead-common-events`) |
@@ -96,13 +96,13 @@ Enemy #1, Animation #1, Tileset #1, Actor #1. Ids `#99` absent everywhere.
 ## Expected verdict
 
 Running all built-in rules (`Registry::with_builtin().run_all`, incl. `orphan-assets`):
-**11 errors, 12 warnings, 3 infos**. Process exit code `2` (errors present).
+**11 errors, 11 warnings, 3 infos**. Process exit code `2` (errors present).
 
 - errors (11): `referential-integrity` ×5 + `broken-transfer` + `broken-assets` ×3
   (GhostPic + MissingArena + Outside_B) + `missing-base` + `plugin-load-order`.
-- warnings (12): `uninitialized-symbols` + `dead-variables` + `dead-code-after-exit` ×3 +
+- warnings (11): `uninitialized-symbols` + `dead-variables` + `dead-code-after-exit` ×2 +
   `dead-self-switch` + `unreachable-self-switch` + `cyclic-common-events` + `shadowed-page` +
   `stuck-autorun` + `unknown-plugin-command` + `impossible-condition`.
 - infos (3): `unreachable-maps` + `orphan-assets` + `dead-common-event`.
 
-CLI default (`--orphans` off) hides the single `orphan-assets` info → 11 errors / 12 warnings / 2 infos.
+CLI default (`--orphans` off) hides the single `orphan-assets` info → 11 errors / 11 warnings / 2 infos.

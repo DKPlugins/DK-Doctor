@@ -226,7 +226,18 @@ pub fn walk(b: &mut IrBuilder, ctx: &WalkCtx, list: &[EventCommand]) {
 
 fn interpret(b: &mut IrBuilder, ctx: &WalkCtx, cmd: &EventCommand, idx: u32, env: &mut ConstEnv) {
     match cmd.code {
-        codes::SHOW_TEXT => face_ref(b, ctx, cmd.as_str(0), idx),
+        codes::SHOW_TEXT => {
+            face_ref(b, ctx, cmd.as_str(0), idx);
+            // MZ speaker name (parameters[4]) may embed a \v[n] escape.
+            message_text_reads(b, ctx, cmd.as_str(4), idx);
+        }
+        // 401/405 — message/scrolling-text body lines: a \v[n] escape prints a
+        // variable's value, which is a READ of that variable.
+        codes::TEXT_DATA | codes::SCROLL_TEXT_DATA => {
+            message_text_reads(b, ctx, cmd.as_str(0), idx)
+        }
+        // 102 — choice labels ([0] = array of strings) may embed \v[n].
+        codes::SHOW_CHOICES => choice_text_reads(b, ctx, cmd, idx),
         codes::CONDITIONAL_BRANCH => conditional_branch(b, ctx, cmd, idx, env),
 
         codes::COMMON_EVENT => {
@@ -274,16 +285,51 @@ fn interpret(b: &mut IrBuilder, ctx: &WalkCtx, cmd: &EventCommand, idx: u32, env
                 write_var(b, ctx, v as u32, idx);
                 env.invalidate(v as u32);
             }
+            // [2]=designation; by variable (1) → [3]/[4] are x/y variableIds READ.
+            if cmd.as_u64(2) == Some(1) {
+                read_var_slot(b, ctx, cmd, 3, idx);
+                read_var_slot(b, ctx, cmd, 4, idx);
+            }
         }
 
-        codes::CHANGE_ITEMS => db_ref0(b, ctx, DbKind::Item, cmd, idx),
-        codes::CHANGE_WEAPONS => db_ref0(b, ctx, DbKind::Weapon, cmd, idx),
-        codes::CHANGE_ARMORS => db_ref0(b, ctx, DbKind::Armor, cmd, idx),
+        // 125/126/127/128 — Gold/Items/Weapons/Armors: the amount may be given by
+        // a variable (operandType==1 → the value slot is a variableId READ).
+        codes::CHANGE_GOLD => operand_var_read(b, ctx, cmd, 1, 2, idx),
+        codes::CHANGE_ITEMS => {
+            db_ref0(b, ctx, DbKind::Item, cmd, idx);
+            operand_var_read(b, ctx, cmd, 2, 3, idx);
+        }
+        codes::CHANGE_WEAPONS => {
+            db_ref0(b, ctx, DbKind::Weapon, cmd, idx);
+            operand_var_read(b, ctx, cmd, 2, 3, idx);
+        }
+        codes::CHANGE_ARMORS => {
+            db_ref0(b, ctx, DbKind::Armor, cmd, idx);
+            operand_var_read(b, ctx, cmd, 2, 3, idx);
+        }
         codes::CHANGE_PARTY_MEMBER => db_ref0(b, ctx, DbKind::Actor, cmd, idx),
         codes::NAME_INPUT => db_ref0(b, ctx, DbKind::Actor, cmd, idx),
 
         codes::TRANSFER_PLAYER => transfer(b, ctx, cmd, idx, env),
-        codes::SHOW_ANIMATION => {
+        // 202 Set Vehicle Location: [1]=designation; by variable (1) → [2]/[3]/[4]
+        // are map/x/y variableIds READ.
+        codes::SET_VEHICLE_LOCATION => {
+            if cmd.as_u64(1) == Some(1) {
+                read_var_slot(b, ctx, cmd, 2, idx);
+                read_var_slot(b, ctx, cmd, 3, idx);
+                read_var_slot(b, ctx, cmd, 4, idx);
+            }
+        }
+        // 203 Set Event Location: [1]=type(0 direct/1 variable/2 swap); by
+        // variable (1) → [2]/[3] are x/y variableIds READ.
+        codes::SET_EVENT_LOCATION => {
+            if cmd.as_u64(1) == Some(1) {
+                read_var_slot(b, ctx, cmd, 2, idx);
+                read_var_slot(b, ctx, cmd, 3, idx);
+            }
+        }
+        // 212 Show Animation / 337 Show Battle Animation: [1]=animationId DB ref.
+        codes::SHOW_ANIMATION | codes::SHOW_BATTLE_ANIMATION => {
             if let Some(id) = cmd.as_u64(1)
                 && id != 0
             {
@@ -299,6 +345,17 @@ fn interpret(b: &mut IrBuilder, ctx: &WalkCtx, cmd: &EventCommand, idx: u32, env
             match c {
                 codes::CHANGE_STATE => actor_ex_extra_db(b, ctx, DbKind::State, cmd, 3, idx),
                 codes::CHANGE_SKILL => actor_ex_extra_db(b, ctx, DbKind::Skill, cmd, 3, idx),
+                // Stat delta by variable: operandType==1 → the value slot is a
+                // variableId READ. HP/MP/TP/EXP/Level keep operandType at [3] and
+                // the value at [4]; Change Parameter (317) shifts them to [4]/[5]
+                // because slot [2] holds the paramId.
+                codes::CHANGE_HP
+                | codes::CHANGE_MP
+                | codes::CHANGE_TP
+                | codes::CHANGE_EXP
+                | codes::CHANGE_LEVEL => operand_var_read(b, ctx, cmd, 3, 4, idx),
+                codes::CHANGE_PARAMETER => operand_var_read(b, ctx, cmd, 4, 5, idx),
+                // 314 Recover All: no operand.
                 _ => {}
             }
         }
@@ -319,6 +376,13 @@ fn interpret(b: &mut IrBuilder, ctx: &WalkCtx, cmd: &EventCommand, idx: u32, env
         codes::CHANGE_VEHICLE_IMAGE => {
             asset_ref(b, ctx, AssetKind::Character, cmd.as_str(1), idx);
         }
+        // 331/332/342 Change Enemy HP/MP/TP (troop battle events): target is a
+        // plain enemy index ([0]), but the delta may be by variable —
+        // operateValue([1]=operation, [2]=operandType, [3]=operand): [2]==1 →
+        // [3] is a variableId READ.
+        codes::CHANGE_ENEMY_HP | codes::CHANGE_ENEMY_MP | codes::CHANGE_ENEMY_TP => {
+            operand_var_read(b, ctx, cmd, 2, 3, idx)
+        }
         codes::CHANGE_ENEMY_STATE => {
             // [0]=index of the troop member (not actorId), [2]=stateId.
             if let Some(id) = cmd.as_u64(2)
@@ -335,7 +399,12 @@ fn interpret(b: &mut IrBuilder, ctx: &WalkCtx, cmd: &EventCommand, idx: u32, env
             }
         }
 
-        codes::SHOW_PICTURE => asset_ref(b, ctx, AssetKind::Picture, cmd.as_str(1), idx),
+        codes::SHOW_PICTURE => {
+            asset_ref(b, ctx, AssetKind::Picture, cmd.as_str(1), idx);
+            picture_position_var_reads(b, ctx, cmd, idx);
+        }
+        // 232 Move Picture: no asset name, but the same position-by-variable slots.
+        codes::MOVE_PICTURE => picture_position_var_reads(b, ctx, cmd, idx),
         codes::PLAY_BGM => asset_ref(b, ctx, AssetKind::Bgm, cmd.audio_name(0), idx),
         codes::PLAY_BGS => asset_ref(b, ctx, AssetKind::Bgs, cmd.audio_name(0), idx),
         codes::PLAY_ME => asset_ref(b, ctx, AssetKind::Me, cmd.audio_name(0), idx),
@@ -415,6 +484,96 @@ fn write_var(b: &mut IrBuilder, ctx: &WalkCtx, id: u32, idx: u32) {
     }
     b.symbols_mut().add_variable_write(id, ctx.site(idx));
     edge(b, ctx, Edge::WritesVariable { variable_id: id }, idx);
+}
+
+/// Reads the variable whose id sits in `parameters[slot]` (skipped if absent).
+/// For "x/y/map by variable" slot groups (201/202/203/231/285).
+fn read_var_slot(b: &mut IrBuilder, ctx: &WalkCtx, cmd: &EventCommand, slot: usize, idx: u32) {
+    if let Some(v) = cmd.as_u64(slot) {
+        read_var(b, ctx, v as u32, idx);
+    }
+}
+
+/// Registers a variable READ for the shared "operand by variable" convention: when
+/// the operand-type slot at `type_idx` is `1` (variable), the slot at `value_idx`
+/// holds a variableId. Covers Change HP/MP/TP/EXP/Level/Parameter and
+/// Change Gold/Items/Weapons/Armors (§1.4). Operand type `0` is a literal amount.
+fn operand_var_read(
+    b: &mut IrBuilder,
+    ctx: &WalkCtx,
+    cmd: &EventCommand,
+    type_idx: usize,
+    value_idx: usize,
+    idx: u32,
+) {
+    if cmd.as_u64(type_idx) == Some(1) {
+        read_var_slot(b, ctx, cmd, value_idx, idx);
+    }
+}
+
+/// Show/Move Picture (231/232) position designation: `[3]==1` (by variable) →
+/// `[4]`/`[5]` are x/y variableIds READ.
+fn picture_position_var_reads(b: &mut IrBuilder, ctx: &WalkCtx, cmd: &EventCommand, idx: u32) {
+    if cmd.as_u64(3) == Some(1) {
+        read_var_slot(b, ctx, cmd, 4, idx);
+        read_var_slot(b, ctx, cmd, 5, idx);
+    }
+}
+
+/// Collects variable ids read via `\v[n]` / `\V[n]` escapes in message text,
+/// preserving first-seen order and de-duplicating. Mirrors RPG Maker's
+/// `convertEscapeCharacters` (`\\V\[(\d+)\]`, case-insensitive): only a literal
+/// digit index is a statically-known read. A nested form `\v[\v[3]]` contributes
+/// the inner literal (3) — the outer index is dynamic and skipped, exactly the
+/// order the engine resolves them. Id `0` (placeholder) is ignored.
+pub(crate) fn collect_text_var_ids(text: &str, out: &mut Vec<u32>) {
+    let bytes = text.as_bytes();
+    let mut i = 0;
+    while i < bytes.len() {
+        if bytes[i] == b'\\'
+            && matches!(bytes.get(i + 1), Some(b'v' | b'V'))
+            && bytes.get(i + 2) == Some(&b'[')
+        {
+            let start = i + 3;
+            let mut k = start;
+            while k < bytes.len() && bytes[k].is_ascii_digit() {
+                k += 1;
+            }
+            if k > start && bytes.get(k) == Some(&b']') {
+                if let Ok(n) = text[start..k].parse::<u32>()
+                    && n != 0
+                    && !out.contains(&n)
+                {
+                    out.push(n);
+                }
+                i = k + 1;
+                continue;
+            }
+        }
+        i += 1;
+    }
+}
+
+/// Registers a variable READ for every `\v[n]` escape in a single text string.
+fn message_text_reads(b: &mut IrBuilder, ctx: &WalkCtx, text: Option<&str>, idx: u32) {
+    let Some(text) = text else { return };
+    let mut ids = Vec::new();
+    collect_text_var_ids(text, &mut ids);
+    for id in ids {
+        read_var(b, ctx, id, idx);
+    }
+}
+
+/// Registers variable reads for `\v[n]` escapes across all choice labels of a
+/// `102` Show Choices command (`parameters[0]` = array of strings).
+fn choice_text_reads(b: &mut IrBuilder, ctx: &WalkCtx, cmd: &EventCommand, idx: u32) {
+    let mut ids = Vec::new();
+    for s in cmd.as_str_array(0) {
+        collect_text_var_ids(s, &mut ids);
+    }
+    for id in ids {
+        read_var(b, ctx, id, idx);
+    }
 }
 
 fn asset_ref(b: &mut IrBuilder, ctx: &WalkCtx, kind: AssetKind, name: Option<&str>, idx: u32) {
@@ -781,17 +940,20 @@ fn change_actor_images(b: &mut IrBuilder, ctx: &WalkCtx, cmd: &EventCommand, idx
 }
 
 /// Handles a script block (355+655 / 111-type-12 / 122-operand-4): Tier B
-/// extracts literal writes to **global switches** (a write edge from the
-/// owner entity — provides a `stuck-autorun` exit and quiets `uninitialized`),
-/// then stores the opaque blackbox (its body is not analyzed further). An empty
-/// source is skipped.
+/// extracts literal writes to **global switches** (a write edge from the owner
+/// entity — provides a `stuck-autorun` exit and quiets `uninitialized`) and
+/// current-event **self-switch** reads/writes (bound to this event's scope), then
+/// stores the opaque blackbox (its body is not analyzed further). An empty source
+/// is skipped.
 ///
-/// Writes to **variables** and **self-switches** from scripts are deliberately NOT emitted as
-/// sites: on the corpus they produced false `dead-variables`/`dead-self-switch`
-/// (a script writes a variable/self-switch read only in another script —
-/// we do not extract reads from scripts) and suffered from cross-event misattribution
-/// (`$gameSelfSwitches.setValue([this._mapId, 9, 'A'])` — a literal foreign
-/// event id). For switches there is no "dead write" rule, so they are safe.
+/// Writes to **variables** from scripts are deliberately NOT emitted as sites: on
+/// the corpus they produced false `dead-variables` (a script writes a variable read
+/// only in another script — we do not extract reads from scripts). For switches there
+/// is no "dead write" rule, so they are safe. Self-switches are emitted only for the
+/// CURRENT-EVENT idiom (`$gameSelfSwitches.setValue/value([this._mapId,
+/// this._eventId, 'X'], …)`), which binds to a known `(map, event)`; a foreign or
+/// computed key (`[this._mapId, 9, 'A']`) stays opaque to avoid cross-event
+/// misattribution.
 fn script_block(b: &mut IrBuilder, ctx: &WalkCtx, source: &str, idx: u32) {
     use dk_doctor_core::ir::{Entity, ScriptBlackbox};
     if source.is_empty() {
@@ -800,6 +962,15 @@ fn script_block(b: &mut IrBuilder, ctx: &WalkCtx, source: &str, idx: u32) {
     let facts = crate::plugins::js::analyze_script(source);
     for id in facts.switch_writes {
         write_switch(b, ctx, id, idx);
+    }
+    // Current-event self-switch reads/writes ([this._mapId, this._eventId, 'X']):
+    // bound to this event's scope — clears false unreachable/dead-self-switch when a
+    // script (not command 123) toggles the event's own self-switch.
+    for ch in facts.self_switch_writes {
+        self_switch_write(b, ctx, ch, idx);
+    }
+    for ch in facts.self_switch_reads {
+        self_switch_read(b, ctx, ch, idx);
     }
     // Literal variable reads ($gameVariables.value(N)) from the script: mark them
     // so dead-variables does not flag a variable consumed only here as dead.

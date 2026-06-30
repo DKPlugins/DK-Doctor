@@ -1,6 +1,6 @@
 [package]
 name = "dk-doctor-desktop"
-version = "0.1.0"
+version = "0.1.1"
 description = "dk-doctor desktop — static analyzer for RPG Maker MV/MZ projects"
 edition = "2021"
 # Open source under the MIT License — see LICENSE.

@@ -116,8 +116,12 @@ level/exp/hp/mp/tp/param); 4 Enemy (p1=troop member index, p2 stat); 5 Character
 | 324 | Change Nickname | `[0]`=**actorId→Actors**, `[1]`=nickname |
 | 325 | Change Profile | `[0]`=**actorId→Actors**, `[1]`=profile |
 | 326 | Change TP | `[0]`/`[1]` actor target; `[2]`=op,`[3]`=operandType,`[4]`=value/varId |
+| 331 | Change Enemy HP | `[0]`=troop member index(-1 all, plain index — NOT a var); `[1]`=op,`[2]`=operandType,`[3]`=value/varId,`[4]`=allowDeath. `operateValue([1],[2],[3])` |
+| 332 | Change Enemy MP | `[0]`=index; `[1]`=op,`[2]`=operandType,`[3]`=value/varId |
+| 342 | Change Enemy TP | `[0]`=index; `[1]`=op,`[2]`=operandType,`[3]`=value/varId |
 | 333 | Change Enemy State | `[0]`=troop member index(-1 all), `[1]`=op(0 add/1 remove), `[2]`=**stateId→States** |
 | 336 | Enemy Transform | `[0]`=index, `[1]`=**enemyId→Enemies** |
+| 337 | Show Battle Animation | `[0]`=index, `[1]`=**animationId→Animations**, `[2]`=forAll |
 
 **Actor-target convention (311–318, 326) — `iterateActorEx([0],[1])`:** `[0]==0` → `[1]` is a **literal actorId**
 (`0` = whole party, NOT a dangling ref); `[0]==1` → `[1]` is a **variableId (READ)** whose value is the actorId

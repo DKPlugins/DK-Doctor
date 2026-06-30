@@ -623,7 +623,7 @@ dependencies = [
 
 [[package]]
 name = "dk-doctor-core"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "camino",
  "rustc-hash",
@@ -634,7 +634,7 @@ dependencies = [
 
 [[package]]
 name = "dk-doctor-desktop"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "camino",
  "dk-doctor-core",
@@ -649,7 +649,7 @@ dependencies = [
 
 [[package]]
 name = "dk-doctor-rpgmaker"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "camino",
  "dk-doctor-core",

@@ -14,6 +14,10 @@ pub const SHOW_TEXT: u16 = 101;
 pub const SHOW_CHOICES: u16 = 102;
 pub const INPUT_NUMBER: u16 = 103;
 pub const SELECT_ITEM: u16 = 104;
+/// Text body line that follows `101` Show Text (one per line).
+pub const TEXT_DATA: u16 = 401;
+/// Text body line that follows `105` Show Scrolling Text.
+pub const SCROLL_TEXT_DATA: u16 = 405;
 pub const GET_LOCATION_INFO: u16 = 285;
 pub const CONDITIONAL_BRANCH: u16 = 111;
 pub const LOOP: u16 = 112;
@@ -27,6 +31,7 @@ pub const CONTROL_VARIABLES: u16 = 122;
 pub const CONTROL_SELF_SWITCH: u16 = 123;
 
 // --- Inventory / actor / enemy (§1.4) ---
+pub const CHANGE_GOLD: u16 = 125;
 pub const CHANGE_ITEMS: u16 = 126;
 pub const CHANGE_WEAPONS: u16 = 127;
 pub const CHANGE_ARMORS: u16 = 128;
@@ -48,11 +53,17 @@ pub const CHANGE_VEHICLE_IMAGE: u16 = 323;
 pub const CHANGE_NICKNAME: u16 = 324;
 pub const CHANGE_PROFILE: u16 = 325;
 pub const CHANGE_TP: u16 = 326;
+pub const CHANGE_ENEMY_HP: u16 = 331;
+pub const CHANGE_ENEMY_MP: u16 = 332;
+pub const CHANGE_ENEMY_TP: u16 = 342;
 pub const CHANGE_ENEMY_STATE: u16 = 333;
 pub const ENEMY_TRANSFORM: u16 = 336;
+pub const SHOW_BATTLE_ANIMATION: u16 = 337;
 
 // --- Transfer / battle / shop (§1.5) ---
 pub const TRANSFER_PLAYER: u16 = 201;
+pub const SET_VEHICLE_LOCATION: u16 = 202;
+pub const SET_EVENT_LOCATION: u16 = 203;
 pub const SHOW_ANIMATION: u16 = 212;
 pub const BATTLE_PROCESSING: u16 = 301;
 pub const SHOP_PROCESSING: u16 = 302;
@@ -60,6 +71,7 @@ pub const SHOP_GOODS_ROW: u16 = 605;
 
 // --- Pictures / media / map visuals (§1.6) ---
 pub const SHOW_PICTURE: u16 = 231;
+pub const MOVE_PICTURE: u16 = 232;
 pub const PLAY_BGM: u16 = 241;
 pub const PLAY_BGS: u16 = 245;
 pub const PLAY_ME: u16 = 249;

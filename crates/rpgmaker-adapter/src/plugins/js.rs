@@ -8,9 +8,10 @@
 //! does not crash the analysis.
 //!
 //! We extract (all at `likely` confidence):
-//!  - literal switch/var writes (`$gameSwitches/$gameVariables.setValue(N, …)`)
-//!    and self-switch (`$gameSelfSwitches.setValue([…, 'A'], …)`) — computed ids
-//!    remain opaque (not resolved);
+//!  - literal switch/var writes (`$gameSwitches/$gameVariables.setValue(N, …)`);
+//!    for self-switches we resolve only the CURRENT-EVENT idiom
+//!    (`$gameSelfSwitches.setValue/value([this._mapId, this._eventId, 'A'], …)`),
+//!    binding the channel to the script's own event — foreign/computed keys stay opaque;
 //!  - command registration (`PluginManager.registerCommand(plugin, command, …)`)
 //!    with name resolution via simple constant propagation;
 //!  - core-method patches (`X.prototype.m = …`) with alias/overwrite classification.
@@ -67,6 +68,14 @@ fn lex(src: &str) -> Vec<Tok> {
                 Punct::OpenBracket => Tok::LBracket,
                 Punct::CloseBracket => Tok::RBracket,
                 _ => Tok::Other,
+            }),
+            // `this` is a keyword, not an Ident — keep it as an Id so the
+            // current-event self-switch idiom (`this._mapId`/`this._eventId`) matches.
+            // Other keywords stay opaque barriers.
+            Token::Keyword(k) => out.push(if k.as_str() == "this" {
+                Tok::Id("this".to_string())
+            } else {
+                Tok::Other
             }),
             Token::Comment(_) => {}
             Token::EoF => break,
@@ -145,8 +154,12 @@ pub struct ScriptJsFacts {
     pub variable_writes: Vec<u32>,
     /// Literal ids of variables read (`$gameVariables.value(N)`).
     pub variable_reads: Vec<u32>,
-    /// Self-switch channels with a literal channel (`$gameSelfSwitches.setValue`).
-    pub self_switch_channels: Vec<char>,
+    /// Self-switch channels WRITTEN via the current-event idiom
+    /// (`$gameSelfSwitches.setValue([this._mapId, this._eventId, 'X'], …)`).
+    pub self_switch_writes: Vec<char>,
+    /// Self-switch channels READ via the current-event idiom
+    /// (`$gameSelfSwitches.value([this._mapId, this._eventId, 'X'])`).
+    pub self_switch_reads: Vec<char>,
     /// Literal ids of common events reserved via
     /// `$gameTemp.reserveCommonEvent(N)` in this event script.
     pub reserved_common_events: Vec<u32>,
@@ -329,14 +342,8 @@ fn prototype_method(t: &[Tok], i: usize) -> Option<(String, usize)> {
     Some((format!("{cls}.prototype.{m}"), i + 2))
 }
 
-/// Scans literal switch/var writes (`obj.setValue(N, …)`) and self-switch.
-fn scan_setvalue(
-    t: &[Tok],
-    switches: &mut Vec<u32>,
-    variables: &mut Vec<u32>,
-    self_switches: Option<&mut Vec<char>>,
-) {
-    let mut self_switches = self_switches;
+/// Scans literal global switch/var writes (`$gameSwitches/$gameVariables.setValue(N, …)`).
+fn scan_setvalue(t: &[Tok], switches: &mut Vec<u32>, variables: &mut Vec<u32>) {
     for i in 0..t.len() {
         let Tok::Id(obj) = &t[i] else { continue };
         if t.get(i + 1) != Some(&Tok::Dot)
@@ -345,46 +352,68 @@ fn scan_setvalue(
         {
             continue;
         }
-        match obj.as_str() {
-            "$gameSwitches" => {
-                if let Some(Tok::Num(Some(n))) = t.get(i + 4)
-                    && *n != 0
-                    && *n <= u32::MAX as u64
-                {
-                    switches.push(*n as u32);
-                }
-            }
-            "$gameVariables" => {
-                if let Some(Tok::Num(Some(n))) = t.get(i + 4)
-                    && *n != 0
-                    && *n <= u32::MAX as u64
-                {
-                    variables.push(*n as u32);
-                }
-            }
-            "$gameSelfSwitches" => {
-                if t.get(i + 4) == Some(&Tok::LBracket)
-                    && let Some(out) = self_switches.as_deref_mut()
-                {
-                    // The channel is the last single-character literal 'A'..'D' before ']'.
-                    let mut ch = None;
-                    let mut j = i + 5;
-                    while j < t.len() && t[j] != Tok::RBracket {
-                        if let Tok::Str(s) = &t[j]
-                            && let Some(c) = self_switch_channel(s)
-                        {
-                            ch = Some(c);
-                        }
-                        j += 1;
-                    }
-                    if let Some(c) = ch {
-                        out.push(c);
-                    }
-                }
-            }
-            _ => {}
+        let target = match obj.as_str() {
+            "$gameSwitches" => &mut *switches,
+            "$gameVariables" => &mut *variables,
+            _ => continue,
+        };
+        if let Some(Tok::Num(Some(n))) = t.get(i + 4)
+            && *n != 0
+            && *n <= u32::MAX as u64
+        {
+            target.push(*n as u32);
         }
     }
+}
+
+/// Scans the CURRENT-EVENT self-switch idiom:
+/// `$gameSelfSwitches.setValue([this._mapId, this._eventId, 'X'], …)` (write) and
+/// `$gameSelfSwitches.value([this._mapId, this._eventId, 'X'])` (read). The key must
+/// be exactly the script's own event so the channel binds to a known `(map, event)`;
+/// a foreign or computed key is skipped to avoid cross-event misattribution.
+fn scan_self_switch_current_event(t: &[Tok], writes: &mut Vec<char>, reads: &mut Vec<char>) {
+    for i in 0..t.len() {
+        if !is_id(t.get(i), "$gameSelfSwitches") || t.get(i + 1) != Some(&Tok::Dot) {
+            continue;
+        }
+        let is_write = match t.get(i + 2) {
+            Some(Tok::Id(s)) if s == "setValue" => true,
+            Some(Tok::Id(s)) if s == "value" => false,
+            _ => continue,
+        };
+        if t.get(i + 3) != Some(&Tok::LParen) {
+            continue;
+        }
+        if let Some(ch) = current_event_channel(t, i + 4) {
+            if is_write {
+                writes.push(ch);
+            } else {
+                reads.push(ch);
+            }
+        }
+    }
+}
+
+/// Matches exactly `[this._mapId, this._eventId, '<ch>']` starting at the `[` token
+/// (`lb`), returning the self-switch channel. Any other key shape yields `None`.
+fn current_event_channel(t: &[Tok], lb: usize) -> Option<char> {
+    if t.get(lb) != Some(&Tok::LBracket)
+        || !is_id(t.get(lb + 1), "this")
+        || t.get(lb + 2) != Some(&Tok::Dot)
+        || !is_id(t.get(lb + 3), "_mapId")
+        || t.get(lb + 4) != Some(&Tok::Comma)
+        || !is_id(t.get(lb + 5), "this")
+        || t.get(lb + 6) != Some(&Tok::Dot)
+        || !is_id(t.get(lb + 7), "_eventId")
+        || t.get(lb + 8) != Some(&Tok::Comma)
+        || t.get(lb + 10) != Some(&Tok::RBracket)
+    {
+        return None;
+    }
+    let Some(Tok::Str(s)) = t.get(lb + 9) else {
+        return None;
+    };
+    self_switch_channel(s)
 }
 
 /// Scans literal variable reads `$gameVariables.value(N)` (N a positive literal).
@@ -433,12 +462,7 @@ pub fn analyze_plugin(src: &str) -> PluginJsFacts {
         ..Default::default()
     };
 
-    scan_setvalue(
-        &t,
-        &mut facts.switch_writes,
-        &mut facts.variable_writes,
-        None,
-    );
+    scan_setvalue(&t, &mut facts.switch_writes, &mut facts.variable_writes);
     scan_value_reads(&t, &mut facts.variable_reads);
     scan_reserve_common_event(&t, &mut facts.reserved_common_events);
 
@@ -508,13 +532,13 @@ pub fn analyze_plugin(src: &str) -> PluginJsFacts {
 pub fn analyze_script(src: &str) -> ScriptJsFacts {
     let t = lex_safe(src);
     let mut facts = ScriptJsFacts::default();
-    scan_setvalue(
-        &t,
-        &mut facts.switch_writes,
-        &mut facts.variable_writes,
-        Some(&mut facts.self_switch_channels),
-    );
+    scan_setvalue(&t, &mut facts.switch_writes, &mut facts.variable_writes);
     scan_value_reads(&t, &mut facts.variable_reads);
+    scan_self_switch_current_event(
+        &t,
+        &mut facts.self_switch_writes,
+        &mut facts.self_switch_reads,
+    );
     scan_reserve_common_event(&t, &mut facts.reserved_common_events);
     facts
 }
@@ -591,10 +615,26 @@ mod tests {
     }
 
     #[test]
-    fn script_extracts_self_switch_channel() {
-        let src = "$gameSelfSwitches.setValue([this._mapId, this._eventId, 'B'], true);";
-        let f = analyze_script(src);
-        assert_eq!(f.self_switch_channels, vec!['B']);
+    fn script_binds_current_event_self_switch_write_and_read() {
+        let w =
+            analyze_script("$gameSelfSwitches.setValue([this._mapId, this._eventId, 'B'], true);");
+        assert_eq!(w.self_switch_writes, vec!['B']);
+        assert!(w.self_switch_reads.is_empty());
+
+        let r =
+            analyze_script("if ($gameSelfSwitches.value([this._mapId, this._eventId, 'A'])) {}");
+        assert_eq!(r.self_switch_reads, vec!['A']);
+        assert!(r.self_switch_writes.is_empty());
+    }
+
+    #[test]
+    fn script_skips_foreign_or_computed_self_switch() {
+        // Foreign event id (literal 9, not this._eventId) → not the current event → skip.
+        let foreign = analyze_script("$gameSelfSwitches.setValue([this._mapId, 9, 'A'], true);");
+        assert!(foreign.self_switch_writes.is_empty());
+        // Computed key (an identifier) → skip.
+        let computed = analyze_script("$gameSelfSwitches.setValue(key, true);");
+        assert!(computed.self_switch_writes.is_empty());
     }
 
     #[test]
