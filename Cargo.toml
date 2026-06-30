@@ -1,0 +1,27 @@
+[workspace]
+resolver = "3"
+members = ["crates/core", "crates/rpgmaker-adapter", "crates/cli"]
+
+[workspace.package]
+edition = "2024"
+# Proprietary beta — see EULA.md / LICENSE (not open source). A LicenseRef keeps
+# tooling honest (no false MIT/Apache signal) while the build is a pre-release.
+license = "LicenseRef-Proprietary"
+
+[workspace.dependencies]
+serde = { version = "1.0.228", features = ["derive"] }
+serde_json = "1.0.150"
+thiserror = "2.0.18"
+rustc-hash = "2.1.2"
+camino = { version = "1.2.4", features = ["serde1"] }
+petgraph = "0.8.3"
+ignore = "0.4.26"
+walkdir = "2.5.0"
+clap = { version = "4.6.1", features = ["derive"] }
+miette = { version = "7.6.0", features = ["fancy"] }
+owo-colors = "4.3.0"
+anstream = "1.0.0"
+insta = "1.48.0"
+sys-locale = "0.3.2"
+ress = "0.11.7"                                    # чистый Rust JS-лексер (Tier B AST-эвристика плагинов)
+toml = "0.9.8"                                     # парсинг профилей плагинов + .dk-doctor/config.toml

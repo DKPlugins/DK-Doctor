@@ -1,0 +1,46 @@
+# Rust / Cargo
+/target/
+**/*.rs.bk
+*.pdb
+
+# Cargo.lock: коммитим (это приложение/CLI, не библиотека) — НЕ игнорируем
+
+# IDE
+.idea/
+.vscode/
+*.iml
+
+# Local AI/dev guide & tooling — internal, kept out of the public repo
+/CLAUDE.md
+.claude/
+
+# OS
+.DS_Store
+Thumbs.db
+Desktop.ini
+
+# Локальные временные артефакты анализатора
+*.log
+/tmp/
+/scratch/
+
+# Test corpus & analyzer output over third-party projects — NEVER commit.
+# These are copyrighted RPG Maker games used only for local testing (multi-GB),
+# and the analyzer reports generated from them. Local-only; must stay out of the repo.
+/projects/
+/reports/
+
+# Stock RPG Maker RTP art used only by the local demo harness (demo.ts/demo-map.ts)
+# to produce marketing screenshots. Proprietary — must not be redistributed here.
+/apps/desktop/public/demo-tiles/
+
+# Desktop app (apps/desktop) — артефакты сборки
+# Backstop: tsc должен работать с noEmit, но если кто-то снова сгенерит .js рядом с .ts — не коммитим
+apps/desktop/src/*.js
+/apps/desktop/node_modules/
+/apps/desktop/dist/
+/apps/desktop/src-tauri/target/
+/apps/desktop/src-tauri/gen/
+/apps/desktop/app-icon.png
+# Коммитим: apps/desktop/pnpm-lock.yaml и apps/desktop/src-tauri/Cargo.lock (это приложение)
+.code-graph/

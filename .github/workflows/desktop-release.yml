@@ -1,0 +1,119 @@
+name: desktop-release
+
+# Тег-триггерный релиз десктоп-приложения: собирает инсталляторы под Windows и
+# macOS и создаёт (черновой) GitHub Release с прикреплёнными бандлами.
+#
+# Запуск:
+#   git tag v0.1.0 && git push origin v0.1.0      # из ЗЕЛЁНОГО main
+# либо вручную через Actions → desktop-release → Run workflow (поле tag).
+#
+# Релиз создаётся как DRAFT + prerelease: бандлы прикрепляются автоматически,
+# но публикуется он только после ручного нажатия «Publish» (можно сперва скачать
+# и проверить артефакты). Оба раннера (win/mac) пишут в один релиз по tagName —
+# первый создаёт, второй дозаливает (штатный мультиплатформенный паттерн
+# tauri-action).
+
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 'Тег релиза (например v0.1.0). Будет создан, если не существует.'
+        required: true
+        type: string
+
+permissions:
+  contents: write # нужно tauri-action, чтобы создать релиз и залить бандлы
+
+jobs:
+  release:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - platform: windows-latest
+            rust-targets: ''
+            args: ''
+          - platform: macos-latest
+            rust-targets: 'aarch64-apple-darwin,x86_64-apple-darwin'
+            args: '--target universal-apple-darwin'
+    runs-on: ${{ matrix.platform }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: 10
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+          cache-dependency-path: apps/desktop/pnpm-lock.yaml
+
+      - name: Install Rust stable
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.rust-targets }}
+
+      - name: Rust cache (isolated src-tauri target)
+        uses: swatinem/rust-cache@v2
+        with:
+          workspaces: 'apps/desktop/src-tauri -> target'
+
+      - name: Install frontend dependencies
+        working-directory: apps/desktop
+        run: pnpm install --frozen-lockfile
+
+      - name: Build frontend
+        working-directory: apps/desktop
+        run: pnpm build
+
+      - name: Build + publish release
+        uses: tauri-apps/tauri-action@v0
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          # --- Подпись (пока не настроена; тест-сборка раздаётся без подписи) ---
+          # Windows Authenticode: задать в tauri.conf.json
+          #   bundle.windows.certificateThumbprint (или signCommand) + секреты CI.
+          # macOS notarization: раскомментировать и добавить секреты репозитория:
+          #   APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
+          #   APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+          #   APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
+          #   APPLE_ID: ${{ secrets.APPLE_ID }}
+          #   APPLE_PASSWORD: ${{ secrets.APPLE_PASSWORD }}
+          #   APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+        with:
+          projectPath: apps/desktop
+          args: ${{ matrix.args }}
+          tagName: ${{ inputs.tag || github.ref_name }}
+          releaseName: 'dk-doctor ${{ inputs.tag || github.ref_name }} (beta)'
+          releaseDraft: true
+          prerelease: true
+          releaseBody: |
+            **Бета-сборка dk-doctor** — статический анализатор проектов RPG Maker MV/MZ.
+            Использование сборки означает согласие с [EULA (бета-тест)](https://github.com/${{ github.repository }}/blob/main/EULA.md).
+
+            ### Установка
+            - **Windows:** скачайте `…_x64-setup.exe` (NSIS). Сборка **не подписана** →
+              SmartScreen покажет «Windows защитила ваш компьютер»: нажмите
+              **«Подробнее» → «Выполнить всё равно»**.
+            - **macOS:** скачайте `.dmg`. Сборка с **ad-hoc подписью** → Gatekeeper
+              может ругаться: **ПКМ по приложению → «Открыть»**, либо в терминале
+              `xattr -dr com.apple.quarantine "/Applications/dk-doctor.app"`.
+
+            ### Что тестировать
+            Откройте свой **открытый (незашифрованный) проект** RPG Maker → оцените
+            отчёт: реальные ли баги/риски, нет ли ложных срабатываний.
+            Уровни достоверности: `certain` (статика) / `likely` (эвристика).
+
+            ### Известные ограничения
+            - Рантайм-имена ассетов и часть динамики плагинов статикой не видны.
+            - Анализ выполняется **полностью локально**; файлы проекта никуда не отправляются.
+
+            ### Обратная связь
+            Issues этого репозитория (приложите краткое описание и, по возможности, фрагмент данных).

@@ -1,0 +1,8 @@
+# Host-neutral toolchain pin для apps/desktop.
+#
+# Корневой rust-toolchain.toml пинит хост-триплет `stable-x86_64-pc-windows-msvc`,
+# который rustup подхватывает обходом вверх и для apps/desktop тоже — это ломает
+# macOS-плечо CI (там нет windows-msvc). Локальный файл переопределяет канал на
+# host-neutral `stable`, поэтому каждый хост резолвит свой родной toolchain.
+[toolchain]
+channel = "stable"

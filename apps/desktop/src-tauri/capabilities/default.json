@@ -1,0 +1,13 @@
+{
+  "$schema": "../gen/schemas/desktop-schema.json",
+  "identifier": "default",
+  "description": "Core defaults + folder picker, file drag-drop, and window show for the main window.",
+  "windows": ["main"],
+  "permissions": [
+    "core:default",
+    "core:window:allow-show",
+    "core:event:default",
+    "dialog:allow-open",
+    "dialog:allow-save"
+  ]
+}

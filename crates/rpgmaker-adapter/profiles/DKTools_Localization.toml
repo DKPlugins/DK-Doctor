@@ -1,0 +1,14 @@
+# Встроенный профиль: DKTools_Localization (плагин-локализатор автора DKPlugins).
+#
+# Грузит локализованные копии ассетов из подпапок по локали:
+#   img/<folder>/<locale>/<name>, audio/<folder>/<locale>/<name>, movies/<locale>/<name>
+# (локали — из data/Languages.json / параметра Languages). В рантайме путь
+# переписывается на <folder>/<locale>/<name> при наличии локализованного файла,
+# иначе фолбэк на базу. Поэтому файлы в per-locale подпапках — ЛЕГИТИМНЫЕ
+# варианты (не сироты), а базовая ссылка удовлетворяется базой ИЛИ любым
+# вариантом. Это гасит ложные broken-assets/orphans на локализованных проектах.
+name = "DKTools_Localization"
+target = "MZ"
+
+[[asset_roots]]
+localized = true

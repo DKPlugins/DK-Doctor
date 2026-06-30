@@ -1,0 +1,24 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>dk-doctor — demo</title>
+    <link rel="stylesheet" href="/src/styles.css" />
+  </head>
+  <body>
+    <div class="app" id="app" data-state="report">
+      <header class="appbar" id="appbar"></header>
+      <div class="updatebar" id="updateBar"></div>
+      <div class="stage" id="stage">
+        <section class="view" id="view"></section>
+        <div class="scrim" id="scrim"></div>
+        <aside class="drawer" id="drawer" aria-label="Finding details"></aside>
+        <div class="toast" id="toast" role="status" aria-live="polite"></div>
+      </div>
+      <div class="modal-scrim" id="settingsScrim"></div>
+      <aside class="settings" id="settings" role="dialog" aria-modal="true"></aside>
+    </div>
+    <script type="module" src="/src/demo.ts"></script>
+  </body>
+</html>

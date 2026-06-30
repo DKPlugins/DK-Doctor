@@ -1,0 +1,13 @@
+# Toolchain pin для воспроизводимой сборки.
+#
+# MSVC C++ Build Tools + Windows SDK установлены (2026-06-28), поэтому используется
+# штатный MSVC-ABI `x86_64-pc-windows-msvc`: чистая дистрибуция exe (без bundling
+# libunwind.dll/std-*.dll), release-exe не лочится антивирусом. rustc сам находит
+# cl.exe/link.exe + SDK через установку VS Build Tools (dev-prompt не нужен).
+#
+# Fallback на самодостаточный gnullvm (если MSVC снести): channel =
+# "stable-x86_64-pc-windows-gnullvm" — линкер для него настроен в .cargo/config.toml
+# (блок привязан к таргету gnullvm и при MSVC-сборке не применяется).
+[toolchain]
+channel = "stable-x86_64-pc-windows-msvc"
+components = ["rustfmt", "clippy"]

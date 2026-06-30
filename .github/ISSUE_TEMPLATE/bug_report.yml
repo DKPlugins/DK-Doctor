@@ -1,0 +1,81 @@
+name: 🐞 Bug report
+description: The analyzer crashed, failed to parse a project, or produced clearly wrong output.
+title: "[bug] "
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for helping improve **dk-doctor**. Please fill in as much as you can — a reproducible
+        case is worth ten descriptions.
+
+        ⚠️ **Do not attach your game's assets or source.** dk-doctor runs fully locally; we never need
+        your project files. A redacted snippet of the relevant `data/*.json` or `js/plugins.js` is enough.
+  - type: checkboxes
+    attributes:
+      label: Pre-flight
+      options:
+        - label: I searched existing issues and this isn't a duplicate.
+          required: true
+        - label: I'm on the latest release (or built from the latest `main`).
+          required: false
+  - type: textarea
+    attributes:
+      label: What happened
+      description: What did the analyzer do, and what did you expect instead?
+      placeholder: |
+        Running `dk-doctor` on my MZ project panics with "..." / produces a finding that makes no sense / ...
+    validations:
+      required: true
+  - type: textarea
+    attributes:
+      label: Steps to reproduce
+      description: The exact command and, if possible, a minimal `data/` snippet or fixture that triggers it.
+      placeholder: |
+        1. `dk-doctor --format json "C:\path\to\project"`
+        2. ...
+      render: shell
+    validations:
+      required: true
+  - type: textarea
+    attributes:
+      label: Output / error
+      description: Console output, panic backtrace (`RUST_BACKTRACE=1`), or the relevant finding. Paste as text, not a screenshot.
+      render: shell
+    validations:
+      required: false
+  - type: dropdown
+    attributes:
+      label: RPG Maker engine
+      options:
+        - MZ
+        - MV
+        - Not sure
+        - Other / ported project
+    validations:
+      required: true
+  - type: dropdown
+    attributes:
+      label: How you ran it
+      options:
+        - CLI (dk-doctor)
+        - Desktop app
+        - Built from source
+    validations:
+      required: true
+  - type: input
+    attributes:
+      label: dk-doctor version
+      description: Release tag, or the `git` commit you built from.
+      placeholder: "v0.1.0 / commit abc1234"
+    validations:
+      required: false
+  - type: dropdown
+    attributes:
+      label: OS
+      options:
+        - Windows
+        - macOS
+        - Linux
+    validations:
+      required: true
