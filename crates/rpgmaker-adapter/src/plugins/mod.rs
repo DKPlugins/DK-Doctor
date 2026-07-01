@@ -9,6 +9,7 @@
 pub mod annotations;
 pub mod collect;
 pub mod js;
+pub mod mine;
 
 /// A plugin as seen by profile post-processing: `(name, plugins.js parameters,
 /// enabled)`, in load order. Shared by the collector and the profile layer.

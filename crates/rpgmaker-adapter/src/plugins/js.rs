@@ -16,6 +16,7 @@
 //!    with name resolution via simple constant propagation;
 //!  - core-method patches (`X.prototype.m = …`) with alias/overwrite classification.
 
+use dk_doctor_core::ir::AssetKind;
 use std::collections::HashMap;
 use std::panic::{AssertUnwindSafe, catch_unwind};
 
@@ -143,6 +144,21 @@ pub struct PluginJsFacts {
     /// Literal ids of common events reserved via
     /// `$gameTemp.reserveCommonEvent(N)` (saves them from `dead-common-event`).
     pub reserved_common_events: Vec<u32>,
+    /// Assets loaded by the plugin at runtime with a LITERAL name
+    /// (`ImageManager.loadPicture("X")`, `AudioManager.playSe({name:"Y"})`). Such
+    /// files are plugin-managed → not broken, not orphan.
+    pub provided_assets: Vec<(AssetKind, String)>,
+    /// `true` if the plugin defines an MV-style `Game_Interpreter.prototype.pluginCommand`
+    /// handler (it owns 356 raw commands).
+    pub mv_command_handler: bool,
+    /// Best-effort command names handled by the MV `pluginCommand` (literal
+    /// comparisons against the command argument). Feeds the profile miner.
+    pub mv_commands: Vec<String>,
+    /// Plugin identity keys declared via `Imported.X = true` / `Imported["X"] = true`.
+    pub imported_names: Vec<String>,
+    /// `true` if the plugin runs dynamic code (`eval(...)` / `new Function(...)`) —
+    /// a runtime-risk signal: some behavior is invisible to static analysis.
+    pub uses_dynamic_code: bool,
 }
 
 /// Facts extracted from an event-script blackbox (355/655, 111-12, 122-4).
@@ -454,6 +470,177 @@ fn scan_reserve_common_event(t: &[Tok], out: &mut Vec<u32>) {
     }
 }
 
+/// `ImageManager.load<Kind>` method name → asset kind (bare, single string arg).
+fn image_load_kind(method: &str) -> Option<AssetKind> {
+    Some(match method {
+        "loadFace" => AssetKind::Face,
+        "loadCharacter" => AssetKind::Character,
+        "loadPicture" => AssetKind::Picture,
+        "loadParallax" => AssetKind::Parallax,
+        "loadTileset" => AssetKind::Tileset,
+        "loadBattleback1" => AssetKind::Battleback1,
+        "loadBattleback2" => AssetKind::Battleback2,
+        "loadTitle1" => AssetKind::Title1,
+        "loadTitle2" => AssetKind::Title2,
+        "loadEnemy" => AssetKind::Enemy,
+        "loadSvEnemy" => AssetKind::SvEnemy,
+        "loadSvActor" => AssetKind::SvActor,
+        "loadAnimation" => AssetKind::Animation,
+        _ => return None,
+    })
+}
+
+/// `AudioManager.play<Kind>` method name → audio asset kind.
+fn audio_play_kind(method: &str) -> Option<AssetKind> {
+    Some(match method {
+        "playBgm" => AssetKind::Bgm,
+        "playBgs" => AssetKind::Bgs,
+        "playMe" => AssetKind::Me,
+        "playSe" => AssetKind::Se,
+        _ => return None,
+    })
+}
+
+/// Scans literal asset loads into `(kind, name)`:
+///  - `…loadPicture("Title")` — image kinds take a bare string first arg;
+///  - `…playSe({ name: "Cursor", … })` — audio kinds take an AudioParams object,
+///    so we pull the `name:` string within the call's parentheses.
+///
+/// A computed/non-literal argument yields nothing (stays opaque). The obj is not
+/// pinned to `ImageManager`/`AudioManager` — the method names are engine-specific
+/// enough — which also catches child-manager subclasses.
+fn scan_asset_loads(t: &[Tok], out: &mut Vec<(AssetKind, String)>) {
+    for i in 1..t.len() {
+        let Tok::Id(method) = &t[i] else { continue };
+        if t[i - 1] != Tok::Dot || t.get(i + 1) != Some(&Tok::LParen) {
+            continue;
+        }
+        // Image: bare string first argument.
+        if let Some(kind) = image_load_kind(method) {
+            if let Some(Tok::Str(name)) = t.get(i + 2)
+                && !name.trim().is_empty()
+            {
+                out.push((kind, name.trim().to_string()));
+            }
+            continue;
+        }
+        // Audio: `{ name: "X" }` object — find the `name:` string inside the call.
+        if let Some(kind) = audio_play_kind(method) {
+            let mut j = i + 2;
+            let mut depth = 0i32;
+            while j < t.len() {
+                match &t[j] {
+                    Tok::LParen => depth += 1,
+                    Tok::RParen => {
+                        if depth == 0 {
+                            break;
+                        }
+                        depth -= 1;
+                    }
+                    Tok::Id(k) if k == "name" => {
+                        // `name` <colon:Other> "<value>"
+                        if let Some(Tok::Str(v)) = t.get(j + 2)
+                            && !v.trim().is_empty()
+                        {
+                            out.push((kind, v.trim().to_string()));
+                            break;
+                        }
+                    }
+                    _ => {}
+                }
+                j += 1;
+            }
+        }
+    }
+}
+
+/// Detects an MV `Game_Interpreter.prototype.pluginCommand = function(cmd, args)`
+/// handler and best-effort-extracts the command names it dispatches on (literal
+/// comparisons `cmd === "X"` / `"X" === cmd`). Returns `(has_handler, names)`.
+///
+/// Best-effort (feeds the profile miner only, never a rule): the command param is
+/// resolved from the handler signature, and we collect string literals directly
+/// adjacent to it via a comparison/other punctuator. Missed names only lower miner
+/// recall; they never create a finding.
+fn scan_mv_plugin_command(t: &[Tok]) -> (bool, Vec<String>) {
+    // Find `.pluginCommand =` then the parameter name after the next `(`.
+    let mut param: Option<String> = None;
+    let mut has_handler = false;
+    for i in 1..t.len() {
+        if !is_id(t.get(i), "pluginCommand")
+            || t[i - 1] != Tok::Dot
+            || t.get(i + 1) != Some(&Tok::Eq)
+        {
+            continue;
+        }
+        has_handler = true;
+        // Scan forward for the first `(` then the identifier right after it.
+        let mut j = i + 2;
+        while j < t.len() && j < i + 8 {
+            if t[j] == Tok::LParen {
+                if let Some(Tok::Id(p)) = t.get(j + 1) {
+                    param = Some(p.clone());
+                }
+                break;
+            }
+            j += 1;
+        }
+        break;
+    }
+    let mut names = Vec::new();
+    if let Some(p) = param {
+        for i in 0..t.len() {
+            // `param <op> "X"` or `"X" <op> param` (op is `===`/`==`, lexed as Other).
+            if is_id(t.get(i), &p)
+                && matches!(t.get(i + 1), Some(Tok::Other))
+                && let Some(Tok::Str(s)) = t.get(i + 2)
+                && !s.trim().is_empty()
+            {
+                names.push(s.trim().to_string());
+            }
+            if let Some(Tok::Str(s)) = t.get(i)
+                && matches!(t.get(i + 1), Some(Tok::Other))
+                && is_id(t.get(i + 2), &p)
+                && !s.trim().is_empty()
+            {
+                names.push(s.trim().to_string());
+            }
+        }
+    }
+    names.sort();
+    names.dedup();
+    (has_handler, names)
+}
+
+/// Scans plugin identity keys `Imported.X = …` / `Imported["X"] = …`.
+fn scan_imported(t: &[Tok], out: &mut Vec<String>) {
+    for i in 0..t.len() {
+        if !is_id(t.get(i), "Imported") {
+            continue;
+        }
+        if t.get(i + 1) == Some(&Tok::Dot)
+            && let Some(Tok::Id(name)) = t.get(i + 2)
+            && t.get(i + 3) == Some(&Tok::Eq)
+        {
+            out.push(name.clone());
+        } else if t.get(i + 1) == Some(&Tok::LBracket)
+            && let Some(Tok::Str(name)) = t.get(i + 2)
+            && t.get(i + 3) == Some(&Tok::RBracket)
+            && t.get(i + 4) == Some(&Tok::Eq)
+        {
+            out.push(name.clone());
+        }
+    }
+}
+
+/// `true` if the source calls `eval(...)` or `Function(...)` (incl. `new Function`).
+fn scan_dynamic_code(t: &[Tok]) -> bool {
+    (0..t.len()).any(|i| {
+        (is_id(t.get(i), "eval") || is_id(t.get(i), "Function"))
+            && t.get(i + 1) == Some(&Tok::LParen)
+    })
+}
+
 /// Parses the JS of an enabled plugin into [`PluginJsFacts`] (tolerantly).
 pub fn analyze_plugin(src: &str) -> PluginJsFacts {
     let t = lex_safe(src);
@@ -465,6 +652,12 @@ pub fn analyze_plugin(src: &str) -> PluginJsFacts {
     scan_setvalue(&t, &mut facts.switch_writes, &mut facts.variable_writes);
     scan_value_reads(&t, &mut facts.variable_reads);
     scan_reserve_common_event(&t, &mut facts.reserved_common_events);
+    scan_asset_loads(&t, &mut facts.provided_assets);
+    scan_imported(&t, &mut facts.imported_names);
+    facts.uses_dynamic_code = scan_dynamic_code(&t);
+    let (mv_handler, mv_commands) = scan_mv_plugin_command(&t);
+    facts.mv_command_handler = mv_handler;
+    facts.mv_commands = mv_commands;
 
     let consts = const_map(&t);
     // Resolves an argument to a string: a literal as-is, an identifier — via consts.
@@ -685,5 +878,72 @@ mod tests {
         let src = "$gameSwitches.setValue(3, true); function( { [ unterminated";
         let f = analyze_plugin(src);
         assert!(f.switch_writes.contains(&3));
+    }
+
+    #[test]
+    fn extracts_literal_image_and_audio_loads() {
+        let src = r#"
+            ImageManager.loadPicture("Title");
+            ImageManager.loadCharacter("$Hero");
+            ImageManager.loadPicture(computedName);           // computed -> skip
+            AudioManager.playSe({ name: "Cursor", volume: 90 });
+            AudioManager.playBgm({ volume: 90 });             // no name -> skip
+            SomeManager.loadWidget("nope");                   // unknown method -> skip
+        "#;
+        let f = analyze_plugin(src);
+        assert!(
+            f.provided_assets
+                .contains(&(AssetKind::Picture, "Title".to_string()))
+        );
+        assert!(
+            f.provided_assets
+                .contains(&(AssetKind::Character, "$Hero".to_string()))
+        );
+        assert!(
+            f.provided_assets
+                .contains(&(AssetKind::Se, "Cursor".to_string()))
+        );
+        assert!(!f.provided_assets.iter().any(|(k, _)| *k == AssetKind::Bgm));
+        assert!(!f.provided_assets.iter().any(|(_, n)| n == "nope"));
+    }
+
+    #[test]
+    fn extracts_mv_plugin_command_names() {
+        let src = r#"
+            var _pc = Game_Interpreter.prototype.pluginCommand;
+            Game_Interpreter.prototype.pluginCommand = function(command, args) {
+                _pc.call(this, command, args);
+                if (command === "OpenShop") { doOpen(); }
+                if ("CloseShop" === command) { doClose(); }
+            };
+        "#;
+        let f = analyze_plugin(src);
+        assert!(f.mv_command_handler);
+        assert!(f.mv_commands.contains(&"OpenShop".to_string()));
+        assert!(f.mv_commands.contains(&"CloseShop".to_string()));
+    }
+
+    #[test]
+    fn no_mv_handler_without_definition() {
+        let f = analyze_plugin("PluginManager.registerCommand('X','y',()=>{});");
+        assert!(!f.mv_command_handler);
+        assert!(f.mv_commands.is_empty());
+    }
+
+    #[test]
+    fn extracts_imported_names_and_dynamic_code() {
+        let src = r#"
+            Imported.MyPlugin = true;
+            Imported["OtherPlugin"] = "1.2.0";
+            var fn = new Function("return 1;");
+        "#;
+        let f = analyze_plugin(src);
+        assert!(f.imported_names.contains(&"MyPlugin".to_string()));
+        assert!(f.imported_names.contains(&"OtherPlugin".to_string()));
+        assert!(f.uses_dynamic_code);
+
+        let clean = analyze_plugin("var x = 1;");
+        assert!(!clean.uses_dynamic_code);
+        assert!(clean.imported_names.is_empty());
     }
 }

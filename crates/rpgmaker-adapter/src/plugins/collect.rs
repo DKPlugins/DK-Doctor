@@ -302,6 +302,12 @@ pub fn collect(
             b.add_reserved_common_event(id);
         }
 
+        // Assets loaded at runtime with a literal name (ImageManager.load*/
+        // AudioManager.play*) → plugin-managed: not broken, not orphan.
+        for (kind, name) in facts.provided_assets {
+            b.add_plugin_provided_asset(AssetKey::new(kind, name));
+        }
+
         // registerCommand → extend the command registry (plugin name from the argument).
         for (plugin, command) in &facts.commands {
             let pc = PluginCommand {
