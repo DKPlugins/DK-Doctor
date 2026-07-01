@@ -17,6 +17,7 @@
 //! `…Common Event`). This is agnostic and suffix-only — see [`InferredKind`].
 
 use dk_doctor_core::ir::DbKind;
+use std::collections::HashMap;
 
 /// Parameter type relevant to Tier A (we are indifferent to the other `@type`s).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -31,7 +32,11 @@ pub enum ParamType {
     /// the value is the DB record id of the corresponding kind. Standard MZ
     /// editor types, agnostic to the specific plugin.
     Db(DbKind),
-    /// Other types (`string`, `number`, struct<…>, …) — Tier A ignores them.
+    /// `@type struct<Name>` / `struct<Name>[]` — the value is a JSON-encoded
+    /// object (or an array of them) whose fields follow the `/*~struct~Name:*/`
+    /// schema. The struct's name is carried in [`ParamSchema::struct_name`].
+    Struct,
+    /// Other types (`string`, `number`, `note`, …) — Tier A ignores them.
     Other,
 }
 
@@ -116,6 +121,9 @@ pub struct ParamSchema {
     pub name: String,
     /// Parameter type (`@type`).
     pub ty: ParamType,
+    /// Struct name for `@type struct<Name>` (else `None`) — the key into
+    /// [`PluginAnnotations::structs`].
+    pub struct_name: Option<String>,
     /// Whether an explicit `@type` tag was present (even an unrecognized one like
     /// `boolean`/`string`/`struct`). Guards name-alias inference: an explicit type
     /// always wins over the name, so `@type boolean` on a `…Switch` param is never
@@ -125,6 +133,20 @@ pub struct ParamSchema {
     pub is_array: bool,
     /// `@dir` — directory for `@type file` (relative to the project root).
     pub dir: Option<String>,
+}
+
+impl ParamSchema {
+    /// A fresh, untyped `@param <name>` schema (before its `@type`/`@dir` lines).
+    fn new(name: String) -> Self {
+        Self {
+            name,
+            ty: ParamType::Other,
+            struct_name: None,
+            has_explicit_type: false,
+            is_array: false,
+            dir: None,
+        }
+    }
 }
 
 /// Parsed plugin header schema.
@@ -140,15 +162,25 @@ pub struct PluginAnnotations {
     pub order_after: Vec<String>,
     /// `@orderBefore`.
     pub order_before: Vec<String>,
+    /// Struct schemas keyed by name (`/*~struct~Name:*/` blocks) — the field
+    /// layout referenced by `@type struct<Name>` parameters.
+    pub structs: HashMap<String, Vec<ParamSchema>>,
 }
 
 impl ParamType {
-    fn from_type_value(value: &str) -> (ParamType, bool) {
+    /// Parses a `@type` value into `(type, is_array, struct_name)`.
+    fn from_type_value(value: &str) -> (ParamType, bool, Option<String>) {
         let trimmed = value.trim();
         let (core, is_array) = match trimmed.strip_suffix("[]") {
             Some(core) => (core.trim(), true),
             None => (trimmed, false),
         };
+        // struct<Name> — the value is a JSON object following the named schema.
+        if let Some(rest) = core.strip_prefix("struct<")
+            && let Some(name) = rest.strip_suffix('>')
+        {
+            return (ParamType::Struct, is_array, Some(name.trim().to_string()));
+        }
         let ty = match core {
             "switch" => ParamType::Switch,
             "variable" => ParamType::Variable,
@@ -167,7 +199,7 @@ impl ParamType {
             "common_event" => ParamType::Db(DbKind::CommonEvent),
             _ => ParamType::Other,
         };
-        (ty, is_array)
+        (ty, is_array, None)
     }
 }
 
@@ -247,20 +279,15 @@ pub fn parse(src: &str) -> PluginAnnotations {
             "@param" => {
                 flush_param(&mut cur_param, &mut out);
                 if !rest.is_empty() {
-                    cur_param = Some(ParamSchema {
-                        name: rest.to_string(),
-                        ty: ParamType::Other,
-                        has_explicit_type: false,
-                        is_array: false,
-                        dir: None,
-                    });
+                    cur_param = Some(ParamSchema::new(rest.to_string()));
                 }
             }
             "@type" => {
                 if let Some(p) = cur_param.as_mut() {
-                    let (ty, is_array) = ParamType::from_type_value(rest);
+                    let (ty, is_array, struct_name) = ParamType::from_type_value(rest);
                     p.ty = ty;
                     p.is_array = is_array;
+                    p.struct_name = struct_name;
                     p.has_explicit_type = true;
                 }
             }
@@ -305,6 +332,90 @@ pub fn parse(src: &str) -> PluginAnnotations {
         }
     }
     flush_param(&mut cur_param, &mut out);
+
+    // Struct schemas: separate `/*~struct~Name:*/` blocks referenced by
+    // `@type struct<Name>`. Default (unsuffixed) blocks win over localized ones.
+    for (name, is_default, block) in extract_struct_blocks(src) {
+        if is_default || !out.structs.contains_key(&name) {
+            out.structs.insert(name, parse_struct_field_params(block));
+        }
+    }
+    out
+}
+
+/// Parses only the `@param`/`@type`/`@dir` lines of a `/*~struct~Name:*/` block
+/// into field schemas (structs carry no `@command`/`@base`).
+fn parse_struct_field_params(block: &str) -> Vec<ParamSchema> {
+    let mut fields = Vec::new();
+    let mut cur: Option<ParamSchema> = None;
+    for raw in block.lines() {
+        let line = clean_line(raw);
+        let Some((tag, rest)) = split_tag(line) else {
+            continue;
+        };
+        match tag {
+            "@param" => {
+                if let Some(p) = cur.take() {
+                    fields.push(p);
+                }
+                if !rest.is_empty() {
+                    cur = Some(ParamSchema::new(rest.to_string()));
+                }
+            }
+            "@type" => {
+                if let Some(p) = cur.as_mut() {
+                    let (ty, is_array, struct_name) = ParamType::from_type_value(rest);
+                    p.ty = ty;
+                    p.is_array = is_array;
+                    p.struct_name = struct_name;
+                    p.has_explicit_type = true;
+                }
+            }
+            "@dir" => {
+                if let Some(p) = cur.as_mut()
+                    && !rest.is_empty()
+                {
+                    p.dir = Some(rest.trim_matches('/').to_string());
+                }
+            }
+            _ => {}
+        }
+    }
+    if let Some(p) = cur {
+        fields.push(p);
+    }
+    fields
+}
+
+/// Extracts every `/*~struct~Name:*/` block as `(name, is_default, body)`.
+///
+/// `is_default` is `false` for a localized block whose name is followed by a
+/// language tag (`/*~struct~Name:ja`) — the default (unsuffixed) block is
+/// preferred, mirroring [`extract_header_block`].
+fn extract_struct_blocks(src: &str) -> Vec<(String, bool, &str)> {
+    const NEEDLE: &str = "/*~struct~";
+    let mut out = Vec::new();
+    let mut from = 0;
+    while let Some(rel) = src[from..].find(NEEDLE) {
+        let after = from + rel + NEEDLE.len();
+        let Some(colon) = src[after..].find(':') else {
+            break;
+        };
+        let name = src[after..after + colon].trim().to_string();
+        let body_start = after + colon + 1;
+        let Some(end_rel) = src[body_start..].find("*/") else {
+            break;
+        };
+        let body = &src[body_start..body_start + end_rel];
+        // A default block has a newline/whitespace right after the colon; a
+        // localized one (`:ja`) starts with a language-tag letter.
+        let is_default = body
+            .chars()
+            .next()
+            .is_none_or(|c| c == '\n' || c == '\r' || c == ' ' || c == '\t');
+        out.push((name, is_default, body));
+        from = body_start + end_rel + 2;
+    }
     out
 }
 
@@ -407,6 +518,65 @@ mod tests {
         assert_eq!(states.ty, ParamType::Db(DbKind::State));
         assert!(states.is_array);
         assert_eq!(by_name("Boss").ty, ParamType::Db(DbKind::Enemy));
+    }
+
+    #[test]
+    fn parses_struct_type_and_its_field_schema() {
+        let src = r#"/*:
+ * @param Templates
+ * @type struct<Template>[]
+ * @default []
+ *
+ * @param Single
+ * @type struct<Template>
+ */
+/*~struct~Template:
+ * @param Trigger Switch
+ * @type switch
+ * @param Reward Common Event
+ * @type common_event
+ * @param Label
+ * @type string
+ */"#;
+        let a = parse(src);
+        let by_name = |n: &str| a.params.iter().find(|p| p.name == n).unwrap();
+        let templates = by_name("Templates");
+        assert_eq!(templates.ty, ParamType::Struct);
+        assert!(templates.is_array);
+        assert_eq!(templates.struct_name.as_deref(), Some("Template"));
+        assert!(templates.has_explicit_type);
+        assert_eq!(by_name("Single").struct_name.as_deref(), Some("Template"));
+        // The referenced struct's field schema is captured.
+        let fields = a.structs.get("Template").expect("struct schema present");
+        let field = |n: &str| fields.iter().find(|p| p.name == n).unwrap();
+        assert_eq!(field("Trigger Switch").ty, ParamType::Switch);
+        assert_eq!(
+            field("Reward Common Event").ty,
+            ParamType::Db(DbKind::CommonEvent)
+        );
+        assert_eq!(field("Label").ty, ParamType::Other);
+    }
+
+    #[test]
+    fn prefers_default_struct_block_over_localized() {
+        let src = r#"/*:
+ * @param P
+ * @type struct<S>
+ */
+/*~struct~S:ja
+ * @param Loc
+ * @type variable
+ */
+/*~struct~S:
+ * @param Def
+ * @type switch
+ */"#;
+        let a = parse(src);
+        let fields = a.structs.get("S").expect("struct S present");
+        // The default block wins: it has Def(switch), not Loc(variable).
+        assert_eq!(fields.len(), 1);
+        assert_eq!(fields[0].name, "Def");
+        assert_eq!(fields[0].ty, ParamType::Switch);
     }
 
     #[test]
