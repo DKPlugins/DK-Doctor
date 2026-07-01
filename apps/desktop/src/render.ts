@@ -166,8 +166,9 @@ function crumbHTML(file: string, path: string): string {
 }
 
 /** Confidence tag for a finding row (certain — no label). */
-function confTag(c: Confidence): string {
-  if (c === "likely") return '<span class="conf conf--likely">(likely)</span>';
+function confTag(lang: Lang, c: Confidence): string {
+  if (c === "likely")
+    return `<span class="conf conf--likely">(${esc(t(lang, "likely"))})</span>`;
   return "";
 }
 
@@ -375,7 +376,7 @@ function tilesHTML(
         segs += `<span class="tile__seg"><span class="tile__dot" style="background:var(${SEV_VAR[sev]})"></span>${n}</span>`;
     }
     if (!segs)
-      segs = `<span class="tile__seg" style="color:var(--sev-ok-text)">${icon("check")}clean</span>`;
+      segs = `<span class="tile__seg" style="color:var(--sev-ok-text)">${icon("check")}${esc(t(s.lang, "tileClean"))}</span>`;
     const active =
       s.filters.category.size === 1 && s.filters.category.has(c) ? " is-active" : "";
     html +=
@@ -403,7 +404,7 @@ function findingRowHTML(s: State, x: IFinding, compact: boolean): string {
       : "";
   let body =
     `<span class="frow__top">${crumb}` +
-    `<span class="frow__meta">${newTag}${jump}<span class="frow__rule">(${esc(f.rule)})</span>${confTag(f.confidence)}` +
+    `<span class="frow__meta">${newTag}${jump}<span class="frow__rule">(${esc(f.rule)})</span>${confTag(s.lang, f.confidence)}` +
     `<span class="frow__chev">${icon("chevron-right")}</span></span></span>`;
   if (!compact) body += `<span class="frow__msg">${styleMessage(f.message)}</span>`;
   return (
@@ -596,7 +597,7 @@ function railHTML(s: State): string {
   catFacet += "</div>";
 
   let confFacet = `<div class="facet"><div class="facet__head"><span class="t">${esc(t(lang, "fConfidence"))}</span>${clr("confidence")}</div>`;
-  for (const c of CONFIDENCES) confFacet += facetRow("confidence", c, c, totals.conf[c], { mono: true });
+  for (const c of CONFIDENCES) confFacet += facetRow("confidence", c, t(lang, c), totals.conf[c]);
   confFacet += "</div>";
 
   return stats + sevFacet + catFacet + confFacet;
@@ -626,19 +627,28 @@ export function reportHTML(s: State): string {
         "</div></div>"
       : "";
   const watchOn = s.settings.watch;
-  const toolbar =
-    '<div class="toolbar">' +
-    `<div class="toolbar__proj"><span class="nm">${esc(s.project?.name ?? "")}</span>` +
-    (last ? `<span class="last">${esc(last)}</span>` : "") +
-    "</div>" +
-    '<span class="toolbar__spacer"></span>' +
-    modeSeg +
-    groupSeg +
+  // Row of actions (right side of the top row).
+  const actions =
     `<button class="iconbtn${watchOn ? " is-on" : ""}" data-act="toggle-watch" title="${esc(t(lang, "watchTip"))}" aria-label="${esc(t(lang, "watchTip"))}" aria-pressed="${watchOn ? "true" : "false"}">${icon("activity")}</button>` +
     `<button class="iconbtn" data-act="open-timeline" title="${esc(t(lang, "timelineTitle"))}" aria-label="${esc(t(lang, "timelineTitle"))}">${icon("history")}</button>` +
     `<button class="btn btn--ghost btn--md" data-act="open-readiness">${icon("clipboard-check")} ${esc(t(lang, "readyTitle"))}</button>` +
     `<button class="iconbtn" data-act="rerun" title="${esc(t(lang, "rerun"))}" aria-label="${esc(t(lang, "rerun"))}">${icon("refresh-cw")}</button>` +
-    `<button class="btn btn--secondary btn--md" data-act="open-export">${icon("download")} ${esc(t(lang, "export"))}</button>` +
+    `<button class="btn btn--secondary btn--md" data-act="open-export">${icon("download")} ${esc(t(lang, "export"))}</button>`;
+  // Two rows: project + actions on top, view-mode + grouping below — keeps the
+  // Export button on-screen on narrow windows instead of overflowing one row.
+  const toolbar =
+    '<div class="toolbar">' +
+    '<div class="toolbar__row">' +
+    `<div class="toolbar__proj"><span class="nm">${esc(s.project?.name ?? "")}</span>` +
+    (last ? `<span class="last">${esc(last)}</span>` : "") +
+    "</div>" +
+    '<span class="toolbar__spacer"></span>' +
+    `<div class="toolbar__actions">${actions}</div>` +
+    "</div>" +
+    '<div class="toolbar__row toolbar__row--sub">' +
+    modeSeg +
+    groupSeg +
+    "</div>" +
     "</div>";
   const body =
     s.reportMode === "atlas"
@@ -676,7 +686,7 @@ export function eventFindingRowHTML(s: State, i: number): string {
   const top =
     '<span class="frow__top">' +
     pageChip +
-    `<span class="frow__meta"><span class="frow__rule">(${esc(f.rule)})</span>${confTag(f.confidence)}` +
+    `<span class="frow__meta"><span class="frow__rule">(${esc(f.rule)})</span>${confTag(s.lang, f.confidence)}` +
     `<span class="frow__chev">${icon("chevron-right")}</span></span></span>`;
   return (
     `<button class="frow frow--${f.severity}${active}" data-find="${i}">` +

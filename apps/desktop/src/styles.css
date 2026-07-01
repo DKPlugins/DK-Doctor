@@ -1281,11 +1281,29 @@ svg {
 }
 .toolbar {
   display: flex;
-  align-items: center;
-  gap: 12px;
-  padding: 11px 16px;
+  flex-direction: column;
+  align-items: stretch;
+  gap: 9px;
+  padding: 10px 16px;
   border-bottom: 1px solid var(--border);
   background: var(--surface);
+}
+.toolbar__row {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  min-width: 0;
+  flex-wrap: wrap;
+}
+.toolbar__row--sub {
+  gap: 10px;
+}
+.toolbar__actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+  justify-content: flex-end;
 }
 .toolbar__proj {
   display: flex;
@@ -1588,14 +1606,18 @@ svg {
 .drawer__new {
   display: inline-flex;
   align-items: center;
-  padding: 2px 7px;
+  flex: none;
+  padding: 3px 9px 3px 8px;
   border-radius: var(--radius-full);
   background: var(--brand-subtle);
   color: var(--brand-text);
   border: 1px solid var(--brand-border);
-  font: var(--weight-bold) var(--text-2xs)/1 var(--font-mono);
-  letter-spacing: 0.06em;
+  /* line-height >1 + nowrap + a hair of extra right padding keep the trailing
+     letter-spacing from clipping the last glyph. */
+  font: var(--weight-bold) var(--text-2xs)/1.3 var(--font-mono);
+  letter-spacing: 0.04em;
   text-transform: uppercase;
+  white-space: nowrap;
 }
 
 /* health header */

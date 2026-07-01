@@ -200,10 +200,5 @@ export function renderSummaryCard(input: SummaryCardInput): string | null {
     ctx.fillText(t(lang, "cleanTitle"), rx, ty + 8);
   }
 
-  // Footer.
-  ctx.fillStyle = FAINT;
-  ctx.font = `500 18px ${SANS}`;
-  ctx.fillText(t(lang, "aboutOffline"), padX, H - 52);
-
   return canvas.toDataURL("image/png");
 }
