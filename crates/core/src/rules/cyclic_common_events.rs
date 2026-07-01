@@ -54,18 +54,7 @@ impl Rule for CyclicCommonEvents {
             if done.contains(&root) {
                 continue;
             }
-            let mut stack: Vec<u32> = Vec::new();
-            let mut on_stack: FxHashSet<u32> = FxHashSet::default();
-            find_cycles(
-                root,
-                &graph,
-                &mut stack,
-                &mut on_stack,
-                &mut done,
-                &mut reported,
-                &mut findings,
-                ir,
-            );
+            find_cycles(root, &graph, &mut done, &mut reported, &mut findings, ir);
         }
         findings
     }
@@ -79,7 +68,7 @@ fn ce_id_of(ir: &Ir, from: EntityId) -> Option<u32> {
     }
 }
 
-/// DFS (white/gray/black coloring) reporting cycles reachable from `node`.
+/// DFS (white/gray/black coloring) reporting cycles reachable from `root`.
 ///
 /// `on_stack` is the gray set (nodes on the current path); a back edge to a gray
 /// node is a cycle. `done` is the black set (fully-explored nodes): we never
@@ -88,48 +77,61 @@ fn ce_id_of(ir: &Ir, from: EntityId) -> Option<u32> {
 /// call graph the naive "recurse into any non-stack node" version is exponential.
 /// Any cycle in a strongly-connected component is still found, because a back
 /// edge to the component's first-entered node is hit while that node is gray.
-#[allow(clippy::too_many_arguments)]
+///
+/// Deliberately iterative (a heap `frames` work-stack of `(node, next-child
+/// index)`) rather than recursive: recursion depth would equal the longest
+/// acyclic call chain, so a pathological project with a very long linear chain of
+/// `117` calls (plugins can grow `CommonEvents` well past the editor's limit)
+/// would overflow the thread stack and abort. The heap stack grows instead.
 fn find_cycles(
-    node: u32,
+    root: u32,
     graph: &FxHashMap<u32, Vec<u32>>,
-    stack: &mut Vec<u32>,
-    on_stack: &mut FxHashSet<u32>,
     done: &mut FxHashSet<u32>,
     reported: &mut FxHashSet<Vec<u32>>,
     findings: &mut Vec<Finding>,
     ir: &Ir,
 ) {
-    stack.push(node);
-    on_stack.insert(node);
+    let mut path: Vec<u32> = vec![root];
+    let mut on_stack: FxHashSet<u32> = FxHashSet::default();
+    on_stack.insert(root);
+    // Frame = (node, index of the next child to visit in `graph[node]`).
+    let mut frames: Vec<(u32, usize)> = vec![(root, 0)];
 
-    if let Some(targets) = graph.get(&node) {
-        for &next in targets {
-            if on_stack.contains(&next) {
-                // Cycle: slice of the stack from the first occurrence of `next`.
-                let start = stack.iter().position(|&n| n == next).unwrap_or(0);
-                let cycle: Vec<u32> = stack[start..].to_vec();
-                let canon = canonical_cycle(&cycle);
-                if reported.insert(canon.clone()) {
-                    findings.push(Finding {
-                        severity: Severity::Warning,
-                        category: Category::DeadCode,
-                        confidence: Confidence::Certain,
-                        location: cycle_location(ir, cycle[0]),
-                        message: Msg::CyclicCommonEvents { cycle },
-                        references: Vec::new(),
-                        rule: "cyclic-common-events",
-                    });
-                }
-            } else if !done.contains(&next) {
-                find_cycles(next, graph, stack, on_stack, done, reported, findings, ir);
+    while let Some(&(node, child_idx)) = frames.last() {
+        let next = graph
+            .get(&node)
+            .and_then(|targets| targets.get(child_idx).copied());
+        let Some(next) = next else {
+            // All children visited: mark black and backtrack.
+            frames.pop();
+            path.pop();
+            on_stack.remove(&node);
+            done.insert(node);
+            continue;
+        };
+        frames.last_mut().unwrap().1 += 1;
+        if on_stack.contains(&next) {
+            // Cycle: slice of the path from the first occurrence of `next`.
+            let start = path.iter().position(|&n| n == next).unwrap_or(0);
+            let cycle: Vec<u32> = path[start..].to_vec();
+            let canon = canonical_cycle(&cycle);
+            if reported.insert(canon.clone()) {
+                findings.push(Finding {
+                    severity: Severity::Warning,
+                    category: Category::DeadCode,
+                    confidence: Confidence::Certain,
+                    location: cycle_location(ir, cycle[0]),
+                    message: Msg::CyclicCommonEvents { cycle },
+                    references: Vec::new(),
+                    rule: "cyclic-common-events",
+                });
             }
+        } else if !done.contains(&next) {
+            frames.push((next, 0));
+            path.push(next);
+            on_stack.insert(next);
         }
     }
-
-    stack.pop();
-    on_stack.remove(&node);
-    // Mark black: fully explored, never re-descend into it again.
-    done.insert(node);
 }
 
 /// Canonical form of a cycle: rotated so that the smallest id comes first.
@@ -249,5 +251,43 @@ mod tests {
         let ctx = RuleCtx::new(&ir);
         // Must terminate (no exponential blow-up) and find no cycle.
         assert!(CyclicCommonEvents.run(&ctx).is_empty());
+    }
+
+    #[test]
+    fn deep_linear_chain_does_not_overflow_stack() {
+        // A long acyclic 117 call chain (1→2→…→N) has depth N; a naive recursive
+        // DFS would recurse N deep and overflow the thread stack. The iterative
+        // walk handles it on the heap and reports no cycle.
+        const N: u32 = 50_000;
+        let mut b = Ir::builder(Engine::Mz);
+        let ents: Vec<EntityId> = (1..=N).map(|id| push_ce(&mut b, id)).collect();
+        for i in 0..(N - 1) {
+            call(&mut b, ents[i as usize], i + 2); // CE(i+1) → CE(i+2)
+        }
+        let ir = b.finish();
+        let ctx = RuleCtx::new(&ir);
+        assert!(CyclicCommonEvents.run(&ctx).is_empty());
+    }
+
+    #[test]
+    fn deep_chain_closing_into_a_cycle_is_still_found() {
+        // Same long chain, but the last node calls back to the first: one big
+        // cycle spanning every node. Must be reported (once) without overflowing.
+        const N: u32 = 20_000;
+        let mut b = Ir::builder(Engine::Mz);
+        let ents: Vec<EntityId> = (1..=N).map(|id| push_ce(&mut b, id)).collect();
+        for i in 0..(N - 1) {
+            call(&mut b, ents[i as usize], i + 2);
+        }
+        call(&mut b, ents[(N - 1) as usize], 1); // CE(N) → CE(1) closes the loop
+        let ir = b.finish();
+        let ctx = RuleCtx::new(&ir);
+        let f = CyclicCommonEvents.run(&ctx);
+        assert_eq!(f.len(), 1);
+        let Msg::CyclicCommonEvents { cycle } = &f[0].message else {
+            panic!("expected CyclicCommonEvents");
+        };
+        assert_eq!(cycle.len() as u32, N);
+        assert_eq!(cycle[0], 1); // canonicalized: smallest id first
     }
 }

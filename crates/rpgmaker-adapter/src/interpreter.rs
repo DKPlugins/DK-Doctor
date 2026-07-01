@@ -1019,6 +1019,23 @@ fn control_variables(
         // no longer trustworthy.
         env.clear();
     }
+    // Operand type 3 (gameData) → gameDataOperand([4]=dataType, [5]=p1, [6]=p2).
+    // Only Item/Weapon/Armor/Actor carry a DB id in p1 (spec §1.3); the remaining
+    // data types address a party/troop/character index or an "other" scalar, none
+    // of which is a database reference.
+    if cmd.as_u64(3) == Some(3)
+        && let Some(kind) = cmd.as_u64(4).and_then(|dt| match dt {
+            0 => Some(DbKind::Item),
+            1 => Some(DbKind::Weapon),
+            2 => Some(DbKind::Armor),
+            3 => Some(DbKind::Actor),
+            _ => None,
+        })
+        && let Some(id) = cmd.as_u64(5)
+        && id != 0
+    {
+        db_ref(b, ctx, kind, id as u32, idx);
+    }
 
     // Update symbolic-range propagation. We support set / add / sub with a
     // literal, a known source variable, or a random min..max range; everything

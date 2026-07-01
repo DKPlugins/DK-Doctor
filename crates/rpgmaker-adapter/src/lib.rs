@@ -256,6 +256,55 @@ mod tests {
         assert!(ir.symbols.variables.get(&20).unwrap().reads.len() == 1);
     }
 
+    #[test]
+    fn control_variables_game_data_item_count_db_ref() {
+        // 122 operand type 3 (gameData), dataType 0 (item count) → [5]=itemId is a
+        // DB reference to Items; referential-integrity relies on this edge to catch
+        // a dangling item id.
+        let list = cmds(vec![
+            json!({"code":122,"indent":0,"parameters":[1,1,0,3,0,7,0]}),
+        ]);
+        let ir = run(&list).finish();
+        assert!(ir.edges.iter().any(|r| matches!(
+            r.edge,
+            Edge::ReferencesDbId {
+                kind: DbKind::Item,
+                id: 7
+            }
+        )));
+    }
+
+    #[test]
+    fn control_variables_game_data_actor_db_ref() {
+        // 122 operand type 3, dataType 3 (actor) → [5]=actorId references Actors.
+        let list = cmds(vec![
+            json!({"code":122,"indent":0,"parameters":[1,1,0,3,3,4,1]}),
+        ]);
+        let ir = run(&list).finish();
+        assert!(ir.edges.iter().any(|r| matches!(
+            r.edge,
+            Edge::ReferencesDbId {
+                kind: DbKind::Actor,
+                id: 4
+            }
+        )));
+    }
+
+    #[test]
+    fn control_variables_game_data_non_db_operand_emits_no_ref() {
+        // 122 operand type 3, dataType 7 (Other: mapId/gold/steps…) carries no DB
+        // id in p1, so no ReferencesDbId edge is emitted — only the range write.
+        let list = cmds(vec![
+            json!({"code":122,"indent":0,"parameters":[1,1,0,3,7,0,0]}),
+        ]);
+        let ir = run(&list).finish();
+        assert!(
+            !ir.edges
+                .iter()
+                .any(|r| matches!(r.edge, Edge::ReferencesDbId { .. }))
+        );
+    }
+
     /// Helper: the target map of the first Transfer edge (if any).
     fn first_transfer_to_map(ir: &Ir) -> Option<Option<u32>> {
         ir.edges.iter().find_map(|r| match &r.edge {
