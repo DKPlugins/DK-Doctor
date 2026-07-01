@@ -464,6 +464,7 @@ mod tests {
             ("Alert Common Event ID", CommonEvent),
             ("CommonEventID", CommonEvent),
             ("Start Common Events IDs", CommonEvent),
+            ("commonEventId", CommonEvent), // Galv (untyped, real CE id)
         ] {
             assert_eq!(
                 infer_symbol_from_name(name),
@@ -483,7 +484,8 @@ mod tests {
             "Grid",
             "Show Percents",
             "Window Width",
-            "Enable", // no suffix at all
+            "commonEventTime", // Galv: a duration, "…Time" is not a suffix match
+            "Enable",          // no suffix at all
             "",
         ] {
             assert_eq!(infer_symbol_from_name(name), None, "{name} must not infer");
