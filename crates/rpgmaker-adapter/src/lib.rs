@@ -21,8 +21,8 @@ use camino::Utf8Path;
 use dk_doctor_core::ir::Ir;
 
 pub use atlas::{
-    AtlasEvent, CommandLine, MapAtlas, MapRender, event_page_commands, map_atlas, map_render,
-    read_project_image,
+    AtlasEvent, CommandLine, MapAtlas, MapEdge, MapGraph, MapNode, MapRender, event_page_commands,
+    map_atlas, map_graph, map_render, read_project_image,
 };
 
 /// Adapter error when loading a project.

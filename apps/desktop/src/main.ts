@@ -10,14 +10,21 @@ import {
   eventCommands,
   exportReport,
   mapAtlas,
+  mapGraph,
   mapRender,
+  onProjectChanged,
   openRelease,
   pickFolder,
   saveImagePng,
+  saveTextFile,
   scan,
   systemLang,
+  unwatchProject,
+  watchProject,
 } from "./api";
 import type { MapRender } from "./api";
+import { buildReportHtml } from "./exportHtml";
+import { renderSummaryCard } from "./summaryCard";
 import { composeMap, composeRegions, disposeTileset, loadTileset } from "./tileset";
 import { buildEventSprites } from "./sprites";
 import { computeHealth } from "./health";
@@ -42,6 +49,7 @@ import {
   eventPanelHTML,
   mainHTML,
   newRestrict,
+  overlayHTML,
   reportHTML,
   resolveAtlasSel,
   scanShellHTML,
@@ -54,12 +62,15 @@ import {
   type AtlasViewport,
   type Settings,
   addRecent,
+  appendHistory,
   clearRecent,
   clearSnapshots,
   loadAtlasMemory,
+  loadHistory,
   loadRecent,
   loadSettings,
   loadSnapshot,
+  removeHistory,
   removeRecent,
   removeSnapshot,
   saveAtlasMemory,
@@ -78,6 +89,8 @@ const drawerEl = $("drawer");
 const toastEl = $("toast");
 const settingsEl = $("settings");
 const settingsScrimEl = $("settingsScrim");
+const overlayEl = $("overlay");
+const overlayScrimEl = $("overlayScrim");
 
 const mql = window.matchMedia("(prefers-color-scheme: dark)");
 const reduced = window.matchMedia("(prefers-reduced-motion: reduce)").matches;
@@ -101,6 +114,7 @@ const state: State = {
   atlasEvent: null,
   atlasNewOnly: false,
   atlasRegions: false,
+  overlay: null,
 };
 
 /** Visible order of findings (for prev/next navigation in the drawer). */
@@ -114,6 +128,14 @@ let atlasController: AtlasController | null = null;
 let pendingFocus: number | null = null;
 /** Monotonic token invalidating stale async tile loads when the map changes. */
 let tilesToken = 0;
+/** Guards a single in-flight map-graph fetch per scan. */
+let graphLoading = false;
+/** Unsubscribe for the Watch Mode `project-changed` listener (null when off). */
+let watchUnlisten: (() => void) | null = null;
+/** Debounce timer coalescing rapid watch-triggered re-scans. */
+let watchTimer: number | undefined;
+/** Monotonic token invalidating a startWatch that lost a race with stopWatch. */
+let watchToken = 0;
 
 // --- Theme/language resolution ---------------------------------------------
 const resolveTheme = (s: Settings): "light" | "dark" =>
@@ -167,6 +189,29 @@ function renderReportView(): void {
   if (main) main.scrollTop = scroll;
   updateOrder();
   if (state.reportMode === "atlas") mountAtlasView();
+  else if (state.reportMode === "graph") void ensureGraph();
+}
+
+/**
+ * Lazily fetches the map-transition graph the first time the graph view is
+ * shown. Failure is non-fatal — an empty graph renders the "no transfers" state
+ * instead of blocking the view.
+ */
+async function ensureGraph(): Promise<void> {
+  if (state.graph || graphLoading || !state.project) return;
+  graphLoading = true;
+  const path = state.project.path;
+  try {
+    const g = await mapGraph(path);
+    if (state.project?.path === path) state.graph = g;
+  } catch {
+    if (state.project?.path === path) {
+      state.graph = { startMapId: 0, nodes: [], edges: [] };
+    }
+  } finally {
+    graphLoading = false;
+  }
+  if (state.view === "report" && state.reportMode === "graph") renderReportView();
 }
 
 /** Tears down the live atlas canvas controller (idempotent). */
@@ -337,12 +382,38 @@ function setTilesHint(show: boolean): void {
   }
 }
 
-/** Switches the report sub-view (atlas/list). */
-function setReportMode(mode: "atlas" | "list"): void {
+/** Switches the report sub-view (atlas/graph/list). */
+function setReportMode(mode: "atlas" | "list" | "graph"): void {
   if (state.reportMode === mode) return;
   state.reportMode = mode;
   renderReportView();
   syncDrawer();
+}
+
+// --- Overlay modals (readiness / timeline / export) ------------------------
+/** Shows/hides the overlay modal based on `state.overlay`. */
+function syncOverlay(): void {
+  const open = state.overlay !== null && state.view === "report";
+  if (open) {
+    overlayEl.innerHTML = overlayHTML(state);
+    overlayEl.classList.add("is-open");
+    overlayScrimEl.classList.add("is-on");
+  } else {
+    overlayEl.classList.remove("is-open");
+    overlayScrimEl.classList.remove("is-on");
+  }
+}
+function openOverlay(kind: "readiness" | "timeline" | "export"): void {
+  if (!state.report) return;
+  if (kind === "timeline" && state.project) {
+    state.history = loadHistory(state.project.path);
+  }
+  state.overlay = kind;
+  syncOverlay();
+}
+function closeOverlay(): void {
+  state.overlay = null;
+  syncOverlay();
 }
 
 /** Selects an atlas target (a map id, the project board, or the overview). */
@@ -373,6 +444,7 @@ function paint(): void {
   else if (state.view === "report") renderReportView();
   // scanning draws #view itself (see startScan)
   syncDrawer();
+  syncOverlay();
 }
 
 // --- Finding drawer --------------------------------------------------------
@@ -599,6 +671,7 @@ async function startScan(path: string): Promise<void> {
   state.drawer = null;
   closeDrawer();
   closeSettings();
+  closeOverlay();
   applyChrome();
   appEl.dataset.state = "scanning";
   appbarEl.innerHTML = appbarHTML(state);
@@ -623,10 +696,13 @@ async function startScan(path: string): Promise<void> {
     state.drawer = null;
     state.newOnly = false;
     state.atlas = undefined;
+    state.graph = undefined;
+    graphLoading = false; // a stale in-flight fetch must not block the new project's graph
     state.atlasSel = null;
     state.atlasEvent = null;
     state.atlasNewOnly = false;
     state.atlasRegions = false;
+    state.overlay = null;
     cmdContextCache.clear();
     // Diff against the previous run of this project, then make this run the new
     // baseline so the next run compares against it.
@@ -639,6 +715,14 @@ async function startScan(path: string): Promise<void> {
       score,
       fps: fingerprintsOf(res.report),
     });
+    // Record this run on the Time Machine timeline.
+    state.history = appendHistory(path, {
+      ts: state.scannedAt,
+      score,
+      errors: res.report.summary.errors,
+      warnings: res.report.summary.warnings,
+      infos: res.report.summary.infos,
+    });
     state.recent = addRecent({
       path,
       name,
@@ -648,6 +732,8 @@ async function startScan(path: string): Promise<void> {
     });
     state.view = "report";
     paint();
+    // (Re)arm Watch Mode for this project if the preference is on.
+    if (state.settings.watch) void startWatch();
     // Fetch the render-only map geometry in the background; when it arrives, the
     // atlas re-renders to mount the spatial canvas. Failure is non-fatal — the
     // atlas falls back to a flat per-map list.
@@ -759,6 +845,131 @@ function doExport(): void {
     .catch(() => toast(t(state.lang, "exportFailed")));
 }
 
+/** Project name reduced to a filesystem-safe stem (shared by exporters). */
+function safeStem(): string {
+  return (state.project?.name ?? "health").replace(/[^\w.-]+/g, "_");
+}
+
+/** Exports the report as a standalone, printable HTML document (D5). */
+async function doExportHtml(): Promise<void> {
+  if (!state.report) return;
+  const html = buildReportHtml({
+    report: state.report,
+    stats: state.stats,
+    projectName: state.project?.name ?? "",
+    projectPath: state.project?.path ?? "",
+    lang: state.lang,
+    generatedAt: Date.now(),
+  });
+  try {
+    const ok = await saveTextFile(html, `${safeStem()}_report.html`, t(state.lang, "dlgSaveHtml"), {
+      name: "HTML",
+      extensions: ["html"],
+    });
+    if (ok) toast(t(state.lang, "exported"));
+  } catch {
+    toast(t(state.lang, "exportFailed"));
+  }
+}
+
+/** Exports a shareable PNG summary card (D10). */
+async function doExportCard(): Promise<void> {
+  if (!state.report) return;
+  const url = renderSummaryCard({
+    report: state.report,
+    stats: state.stats,
+    projectName: state.project?.name ?? "",
+    lang: state.lang,
+    generatedAt: Date.now(),
+  });
+  if (!url) {
+    toast(t(state.lang, "pngFailed"));
+    return;
+  }
+  try {
+    const ok = await saveImagePng(url, `${safeStem()}_card.png`, t(state.lang, "dlgSavePng"));
+    if (ok) toast(t(state.lang, "pngSaved"));
+  } catch {
+    toast(t(state.lang, "pngFailed"));
+  }
+}
+
+/** Dispatches an export chosen from the export overlay. */
+function exportAs(kind: string): void {
+  closeOverlay();
+  if (kind === "html") void doExportHtml();
+  else if (kind === "png") void doExportCard();
+  else doExport();
+}
+
+// --- Watch Mode ------------------------------------------------------------
+/**
+ * Begins watching the open project for changes (replacing any prior watcher).
+ *
+ * `startWatch`/`stopWatch` overlap: the async `listen`/`watchProject` round-trips
+ * can interleave with a toggle-off or a project switch. A monotonic token guards
+ * against that — if it advances during an await, the just-established listener is
+ * torn down instead of silently re-arming a watcher the user disabled.
+ */
+async function startWatch(): Promise<void> {
+  if (!state.project) return;
+  stopWatch();
+  const path = state.project.path;
+  const token = ++watchToken;
+  try {
+    const unlisten = await onProjectChanged((changedPath) => {
+      // Guard on the live preference too: a stale listener must never re-scan
+      // after Watch Mode was turned off.
+      if (!state.settings.watch || busy || state.view !== "report") return;
+      if (!state.project || state.project.path !== changedPath) return;
+      // Coalesce a burst of file writes into one re-scan.
+      if (watchTimer) clearTimeout(watchTimer);
+      watchTimer = window.setTimeout(() => {
+        if (!busy && state.project?.path === changedPath) void startScan(changedPath);
+      }, 400);
+    });
+    if (token !== watchToken) {
+      unlisten();
+      return;
+    }
+    watchUnlisten = unlisten;
+    await watchProject(path);
+    // A toggle-off / re-arm that happened while awaiting invalidates us.
+    if (token !== watchToken) stopWatch();
+  } catch {
+    /* watch unavailable (outside Tauri / permission) — the toggle is a no-op */
+  }
+}
+
+/** Stops watching and clears the pending debounce (idempotent). */
+function stopWatch(): void {
+  watchToken++; // invalidate any startWatch still awaiting its listen/watch calls
+  if (watchTimer) {
+    clearTimeout(watchTimer);
+    watchTimer = undefined;
+  }
+  if (watchUnlisten) {
+    watchUnlisten();
+    watchUnlisten = null;
+  }
+  void unwatchProject().catch(() => {});
+}
+
+/** Toggles Watch Mode from the toolbar (persists the preference). */
+function toggleWatch(): void {
+  const on = !state.settings.watch;
+  state.settings = { ...state.settings, watch: on };
+  saveSettings(state.settings);
+  if (on) {
+    void startWatch();
+    toast(t(state.lang, "watchEnabled"));
+  } else {
+    stopWatch();
+    toast(t(state.lang, "watchDisabled"));
+  }
+  if (state.view === "report") renderReportView();
+}
+
 function clearRecentList(): void {
   clearRecent();
   clearSnapshots();
@@ -776,6 +987,7 @@ document.addEventListener("click", (e) => {
   if (del) {
     e.stopPropagation();
     removeSnapshot(del.dataset.del!);
+    removeHistory(del.dataset.del!);
     state.recent = removeRecent(del.dataset.del!);
     if (state.view === "welcome") setView("view view--welcome", welcomeHTML(state));
     return;
@@ -815,8 +1027,20 @@ document.addEventListener("click", (e) => {
         state.atlasNewOnly = !state.atlasNewOnly;
         renderReportView();
         break;
-      case "export":
-        doExport();
+      case "open-export":
+        openOverlay("export");
+        break;
+      case "open-readiness":
+        openOverlay("readiness");
+        break;
+      case "open-timeline":
+        openOverlay("timeline");
+        break;
+      case "close-overlay":
+        closeOverlay();
+        break;
+      case "toggle-watch":
+        toggleWatch();
         break;
       case "copy":
       case "ignore":
@@ -894,7 +1118,13 @@ document.addEventListener("click", (e) => {
   }
   const modeBtn = target.closest<HTMLElement>("[data-mode]");
   if (modeBtn) {
-    setReportMode(modeBtn.dataset.mode as "atlas" | "list");
+    setReportMode(modeBtn.dataset.mode as "atlas" | "list" | "graph");
+    return;
+  }
+  // export chooser option (in the export overlay)
+  const exBtn = target.closest<HTMLElement>("[data-export]");
+  if (exBtn) {
+    exportAs(exBtn.dataset.export!);
     return;
   }
   const treeTog = target.closest<HTMLElement>("[data-treetoggle]");
@@ -908,6 +1138,8 @@ document.addEventListener("click", (e) => {
   const mapSel = target.closest<HTMLElement>("[data-mapsel]");
   if (mapSel) {
     const v = mapSel.dataset.mapsel!;
+    // A click on a graph node jumps to that map's atlas view.
+    if (state.reportMode === "graph") state.reportMode = "atlas";
     selectAtlas(v === "project" || v === "overview" ? v : Number(v));
     return;
   }
@@ -938,6 +1170,7 @@ document.addEventListener("click", (e) => {
 
   if (target === scrimEl) closeDrawer();
   else if (target === settingsScrimEl) closeSettings();
+  else if (target === overlayScrimEl) closeOverlay();
 });
 
 
@@ -947,6 +1180,7 @@ document.addEventListener("keydown", (e) => {
 
   if (e.key === "Escape") {
     if (settingsEl.classList.contains("is-open")) closeSettings();
+    else if (state.overlay !== null) closeOverlay();
     else if (state.drawer !== null) closeDrawer();
     return;
   }

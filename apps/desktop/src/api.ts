@@ -1,4 +1,5 @@
 import { invoke } from "@tauri-apps/api/core";
+import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 import { open, save } from "@tauri-apps/plugin-dialog";
 
 /** Severity level of a finding (as in serde: lowercase). */
@@ -181,6 +182,37 @@ export async function mapRender(path: string, mapId: number): Promise<MapRender>
   return await invoke<MapRender>("map_render", { path, mapId });
 }
 
+/** One map node in the transition graph (mirror of Rust `MapNode`). */
+export interface MapNode {
+  id: number;
+  name: string;
+  /** Count of by-variable (dynamic) transfer exits not resolvable statically. */
+  dynamicExits: number;
+}
+
+/** A directed transfer edge, source → target map (mirror of Rust `MapEdge`). */
+export interface MapEdge {
+  from: number;
+  to: number;
+}
+
+/** Map-transition graph sidecar (mirror of Rust `MapGraph`). */
+export interface MapGraph {
+  /** Start map id from System.json (0 = unset). */
+  startMapId: number;
+  nodes: MapNode[];
+  edges: MapEdge[];
+}
+
+/**
+ * Fetches the map-transition graph (nodes = maps, edges = direct 201 transfers)
+ * for the "Map graph" view. Render-only; may reject — callers treat failure as
+ * "no graph" and fall back to the map list.
+ */
+export async function mapGraph(path: string): Promise<MapGraph> {
+  return await invoke<MapGraph>("map_graph", { path });
+}
+
 /**
  * Reads a project image (relative to the asset root, e.g.
  * `img/tilesets/World.png`) as raw bytes. Returns an `ArrayBuffer` suitable for
@@ -229,6 +261,48 @@ export async function exportReport(
     contents: JSON.stringify(report, null, 2),
   });
   return true;
+}
+
+/**
+ * Saves arbitrary text to a user-chosen file: system save dialog → write via the
+ * `write_text_file` command. `filter` names the extension shown in the dialog.
+ * Returns `false` if the user cancelled.
+ */
+export async function saveTextFile(
+  contents: string,
+  defaultName: string,
+  title: string,
+  filter: { name: string; extensions: string[] },
+): Promise<boolean> {
+  const path = await save({ title, defaultPath: defaultName, filters: [filter] });
+  if (!path) return false;
+  await invoke("write_text_file", { path, contents });
+  return true;
+}
+
+/** Starts native Watch Mode over the project's `data/` folder (replaces any prior). */
+export async function watchProject(path: string): Promise<void> {
+  await invoke("watch_project", { path });
+}
+
+/** Stops native Watch Mode (no-op if nothing is watched). */
+export async function unwatchProject(): Promise<void> {
+  await invoke("unwatch_project");
+}
+
+/**
+ * Subscribes to the backend `project-changed` event (fired by Watch Mode when
+ * the open project's files change on disk). The payload is the watched project
+ * path. Returns an unlisten function; resolves to a no-op outside Tauri.
+ */
+export async function onProjectChanged(
+  cb: (path: string) => void,
+): Promise<UnlistenFn> {
+  try {
+    return await listen<string>("project-changed", (e) => cb(e.payload));
+  } catch {
+    return () => {};
+  }
 }
 
 /** Decodes a `data:image/png;base64,…` URL into raw bytes. */

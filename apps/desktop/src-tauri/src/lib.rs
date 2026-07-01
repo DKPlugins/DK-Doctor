@@ -6,6 +6,7 @@
 
 pub mod analyze;
 pub mod report_json;
+pub mod watch;
 
 /// Writes a text file to an absolute path (for exporting the report).
 ///
@@ -59,13 +60,17 @@ pub fn run() {
 
     tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
+        .manage(watch::WatchState::default())
         .invoke_handler(tauri::generate_handler![
             analyze::scan,
             analyze::analyze,
             analyze::map_atlas,
             analyze::map_render,
+            analyze::map_graph,
             analyze::event_commands,
             analyze::read_project_image,
+            watch::watch_project,
+            watch::unwatch_project,
             write_text_file,
             write_binary_file,
             open_url

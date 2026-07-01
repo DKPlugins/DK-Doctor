@@ -8,7 +8,7 @@
 use camino::Utf8PathBuf;
 use dk_doctor_core::{Engine, Entity, Ir, Lang, Registry, Report, RuleCtx, Severity};
 use dk_doctor_rpgmaker::{
-    load_project, load_project_with_warnings, CommandLine, MapAtlas, MapRender,
+    load_project, load_project_with_warnings, CommandLine, MapAtlas, MapGraph, MapRender,
 };
 use serde::{Deserialize, Serialize};
 
@@ -146,6 +146,19 @@ pub async fn map_atlas(path: String) -> Result<Vec<MapAtlas>, String> {
 pub async fn map_render(path: String, map_id: u32) -> Result<MapRender, String> {
     tauri::async_runtime::spawn_blocking(move || {
         dk_doctor_rpgmaker::map_render(&Utf8PathBuf::from(path), map_id).map_err(|e| e.to_string())
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
+/// Returns the map-transition graph sidecar (nodes = maps, edges = direct 201
+/// transfers) for the desktop "Map graph" view. Render-only and on-demand;
+/// independent of the findings report. Best-effort — `Err(String)` on load
+/// failure, the UI treats it as "no graph".
+#[tauri::command]
+pub async fn map_graph(path: String) -> Result<MapGraph, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        dk_doctor_rpgmaker::map_graph(&Utf8PathBuf::from(path)).map_err(|e| e.to_string())
     })
     .await
     .map_err(|e| e.to_string())?

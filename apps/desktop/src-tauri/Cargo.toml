@@ -25,6 +25,8 @@ serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 camino = { version = "1", features = ["serde1"] }
 sys-locale = "0.3"
+# Native filesystem watcher (Watch Mode): debounced notify events → re-scan.
+notify-debouncer-mini = "0.4"
 # Встраиваем анализатор КАК БИБЛИОТЕКУ (путь на три уровня вверх — оба крейта
 # подключаются как внешние path-зависимости, без публикации/версий).
 dk-doctor-core = { path = "../../../crates/core" }
