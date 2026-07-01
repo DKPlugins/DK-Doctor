@@ -28,7 +28,12 @@ export function scoreSparklineSVG(points: RunHistoryPoint[]): string {
   const plotH = H - PAD_T - PAD_B;
   const n = points.length;
   const x = (i: number) => PAD_L + (n === 1 ? plotW / 2 : (i / (n - 1)) * plotW);
-  const y = (score: number) => PAD_T + (1 - Math.max(0, Math.min(100, score)) / 100) * plotH;
+  const y = (score: number) => {
+    // A tampered localStorage history entry can carry a non-finite score, which
+    // would otherwise yield NaN SVG coordinates and a broken sparkline.
+    const s = Number.isFinite(score) ? score : 0;
+    return PAD_T + (1 - Math.max(0, Math.min(100, s)) / 100) * plotH;
+  };
 
   // Horizontal guides at 0 / 50 / 75 / 100 with left-axis labels.
   let grid = "";

@@ -571,8 +571,13 @@ export function mountCanvas(canvas: HTMLCanvasElement, opts: CanvasOpts): AtlasC
     if (rows * ec > EXPORT_CAP) ec = Math.min(ec, Math.floor(EXPORT_CAP / rows));
     ec = Math.max(2, ec);
     const off = document.createElement("canvas");
-    off.width = cols * ec;
-    off.height = rows * ec;
+    // Clamp the final surface to EXPORT_CAP on each axis. A corrupt map with a
+    // huge column/row count (e.g. an event placed at x=100000) makes EXPORT_CAP/cols
+    // floor to 0, and the Math.max(2, ec) floor then defeats the cap above — without
+    // this clamp the canvas would be hundreds of thousands of px wide and throw in
+    // toDataURL(). Culling keeps the (necessarily truncated) export from erroring.
+    off.width = Math.min(EXPORT_CAP, cols * ec);
+    off.height = Math.min(EXPORT_CAP, rows * ec);
     const c = off.getContext("2d");
     if (!c) return canvas.toDataURL("image/png");
     c.fillStyle = col.bg;

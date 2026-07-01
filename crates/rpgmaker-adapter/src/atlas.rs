@@ -8,7 +8,7 @@
 
 use crate::build::detect_layout;
 use crate::raw::map::MapInfo;
-use camino::Utf8Path;
+use camino::{Utf8Component, Utf8Path};
 use serde::{Deserialize, Serialize};
 
 /// One map's geometry plus its event placements (schematic, no tile art).
@@ -522,7 +522,20 @@ pub fn map_graph(root: &Utf8Path) -> Result<MapGraph, crate::AdapterError> {
 /// (`.rpgmvp` for MV, `.png_` for MZ) are read and decrypted with the project's
 /// `encryptionKey`. Path traversal is rejected. Used by the Atlas tile renderer.
 pub fn read_project_image(root: &Utf8Path, rel: &str) -> Result<Vec<u8>, crate::AdapterError> {
-    if rel.contains("..") || rel.starts_with('/') || rel.starts_with('\\') {
+    // Reject path traversal and any absolute path. The string checks catch a
+    // leading separator and `..`; the component scan additionally catches a
+    // Windows drive prefix (`C:\…` or drive-relative `C:foo`), which
+    // `base.join(rel)` would otherwise resolve to a location *outside* the
+    // project, discarding `base` entirely and reading an arbitrary file.
+    let rel_path = Utf8Path::new(rel);
+    if rel.contains("..")
+        || rel.starts_with('/')
+        || rel.starts_with('\\')
+        || rel_path.is_absolute()
+        || rel_path
+            .components()
+            .any(|c| matches!(c, Utf8Component::Prefix(_) | Utf8Component::RootDir))
+    {
         return Err(crate::AdapterError::ProjectNotFound(rel.to_string()));
     }
     let Some(layout) = detect_layout(root) else {
@@ -609,6 +622,27 @@ mod graph_tests {
             .join("..")
             .join("testdata")
             .join("mz-fixture")
+    }
+
+    #[test]
+    fn read_project_image_rejects_traversal_and_absolute() {
+        let root = fixture_root();
+        // Parent-dir traversal and leading separators are rejected regardless of
+        // whether the file exists.
+        assert!(read_project_image(&root, "../../../etc/passwd").is_err());
+        assert!(read_project_image(&root, "img/../../secret.png").is_err());
+        assert!(read_project_image(&root, "/etc/passwd").is_err());
+        assert!(read_project_image(&root, "\\Windows\\win.ini").is_err());
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn read_project_image_rejects_windows_drive_paths() {
+        let root = fixture_root();
+        // A Windows drive-qualified path must not escape the project root: on
+        // Windows `base.join("C:\\…")` discards `base` and reads an arbitrary file.
+        assert!(read_project_image(&root, "C:\\Windows\\System32\\drivers\\etc\\hosts").is_err());
+        assert!(read_project_image(&root, "C:secret.png").is_err());
     }
 
     #[test]

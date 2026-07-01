@@ -33,8 +33,8 @@ fn write_binary_file(path: String, bytes: Vec<u8>) -> Result<(), String> {
 /// opener itself is the OS's built-in one, with no third-party dependencies.
 #[tauri::command]
 fn open_url(url: String) -> Result<(), String> {
-    if !url.starts_with("https://") {
-        return Err("only https URLs are allowed".to_string());
+    if !is_safe_https_url(&url) {
+        return Err("only plain https URLs are allowed".to_string());
     }
     let result = if cfg!(target_os = "windows") {
         std::process::Command::new("cmd")
@@ -46,6 +46,21 @@ fn open_url(url: String) -> Result<(), String> {
         std::process::Command::new("xdg-open").arg(&url).spawn()
     };
     result.map(|_| ()).map_err(|e| e.to_string())
+}
+
+/// Whether `url` is a plain `https` URL safe to hand to the OS opener.
+///
+/// Beyond the `https://` scheme we reject control characters, whitespace and the
+/// shell metacharacters `" & | ^ < >`: on Windows the URL is passed to
+/// `cmd /C start`, whose re-parsing of those characters is an injection surface.
+/// The only caller today passes a fixed GitHub URL (which contains none of
+/// these), so this is defense-in-depth against a future caller.
+fn is_safe_https_url(url: &str) -> bool {
+    url.starts_with("https://")
+        && url.len() <= 2048
+        && !url
+            .bytes()
+            .any(|b| b <= 0x20 || matches!(b, b'"' | b'&' | b'|' | b'^' | b'<' | b'>'))
 }
 
 /// Launches the application: registers the dialog plugin and the
@@ -94,4 +109,29 @@ pub fn run() {
         })
         .run(tauri::generate_context!())
         .expect("error while running dk-doctor desktop");
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn open_url_guard_accepts_plain_github_urls() {
+        assert!(is_safe_https_url(
+            "https://github.com/DKPlugins/DK-Doctor/releases/tag/v0.1.1"
+        ));
+        assert!(is_safe_https_url(
+            "https://github.com/DKPlugins/DK-Doctor/blob/main/docs/rules.md#dead-switch"
+        ));
+    }
+
+    #[test]
+    fn open_url_guard_rejects_non_https_and_shell_metacharacters() {
+        assert!(!is_safe_https_url("http://example.com"));
+        assert!(!is_safe_https_url("file:///etc/passwd"));
+        assert!(!is_safe_https_url("javascript:alert(1)"));
+        assert!(!is_safe_https_url("https://x/\" & calc & "));
+        assert!(!is_safe_https_url("https://x/a|b"));
+        assert!(!is_safe_https_url("https://x/a\nb"));
+    }
 }
