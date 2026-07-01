@@ -30,7 +30,7 @@ use dk_doctor_core::ir::{
 };
 
 /// Maps `@dir`/folder → [`AssetKind`] for `@type file` parameters.
-fn folder_to_kind(dir: &str) -> Option<AssetKind> {
+pub(crate) fn folder_to_kind(dir: &str) -> Option<AssetKind> {
     let norm = dir.trim_matches('/').to_ascii_lowercase();
     // Strip the leading `img/` (`@dir img/pictures` and `@dir pictures` are both valid).
     let tail = norm.strip_prefix("img/").unwrap_or(&norm);
@@ -63,7 +63,7 @@ fn folder_to_kind(dir: &str) -> Option<AssetKind> {
 /// Scalar: `"5"` → `[5]`. Array (JSON string): `'["10","11"]'` → `[10, 11]`.
 /// Non-numeric/empty elements and `0` are skipped; the result is deduplicated
 /// while preserving order (a duplicate id yields no duplicate edges/findings).
-fn decode_ids(value: &str, is_array: bool) -> Vec<u32> {
+pub(crate) fn decode_ids(value: &str, is_array: bool) -> Vec<u32> {
     let mut out = Vec::new();
     if is_array {
         // The value is a JSON string-array of strings (sometimes nested). Decode
@@ -97,7 +97,7 @@ fn push_id(s: &str, out: &mut Vec<u32>) {
 }
 
 /// Decodes a `@type file` value into a set of asset paths (without extension).
-fn decode_files(value: &str, is_array: bool) -> Vec<String> {
+pub(crate) fn decode_files(value: &str, is_array: bool) -> Vec<String> {
     let mut out = Vec::new();
     if is_array {
         if let Ok(arr) = serde_json::from_str::<Vec<String>>(value) {

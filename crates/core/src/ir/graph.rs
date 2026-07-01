@@ -205,6 +205,13 @@ impl IrBuilder {
         self.plugin_meta = meta;
     }
 
+    /// Mutable access to the plugin metadata for post-processing (curated
+    /// profiles amend the command registry / order declarations after
+    /// [`set_plugin_meta`](Self::set_plugin_meta) has run).
+    pub fn plugin_meta_mut(&mut self) -> &mut PluginMeta {
+        &mut self.plugin_meta
+    }
+
     /// Registers a plugin command call (356/357) with its location.
     pub fn add_plugin_command_call(&mut self, call: PluginCommandCall, location: Location) {
         self.plugin_command_calls.push((call, location));

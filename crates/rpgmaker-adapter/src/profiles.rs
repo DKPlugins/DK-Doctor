@@ -14,9 +14,24 @@
 //!
 //! Facts are folded into the ALREADY existing IR hooks (`plugin_provided_assets` /
 //! `assets_present`), which `broken-assets` already skips — the core stays untouched.
+//!
+//! Beyond assets, a profile can declare **curated per-plugin parameter/command/
+//! dependency facts** — the manual override for what the agnostic name-alias
+//! inference (Tier A) cannot reach: `[[symbol_param]]` (value is switch/variable
+//! ids → `declared_by_plugin`), `[[db_param]]`/`[[common_event_param]]` (value is
+//! a DB record id → `ReferencesDbId`, `certain` because the profile is authored),
+//! `[[asset_param]]` (value is an asset path → plugin-provided), `[[asset_pattern]]`
+//! (a glob of runtime-loaded assets → not orphans, quality-gated against
+//! whole-folder over-suppression), `[[plugin_command]]` (a dynamically registered
+//! command → command registry) and `[dependency]` (`@base`/order overrides).
+//! Quality-gate principle: a profile ADDS facts, it never blanket-silences a rule.
 
+use crate::plugins::collect::{decode_files, decode_ids, folder_to_kind};
 use camino::Utf8Path;
-use dk_doctor_core::ir::{AssetKey, AssetKind, IrBuilder};
+use dk_doctor_core::ir::{
+    AssetKey, AssetKind, DbKind, Edge, Entity, EntityId, IrBuilder, Location, PathSeg,
+    PluginCommand, PluginOrderDeps, PluginRef,
+};
 
 /// Built-in profiles (compiled in). File name == plugin `name`.
 const BUILTIN_PROFILES: &[&str] = &[
@@ -61,6 +76,89 @@ struct MapParam {
     param: String,
 }
 
+/// A plugin parameter whose value is switch/variable id(s). The plugin manages
+/// the symbol at runtime → `declared_by_plugin` (suppresses `uninitialized-symbols`).
+/// Manual override for names the agnostic suffix inference does not reach.
+#[derive(Debug, Clone, Default, serde::Deserialize)]
+#[serde(default)]
+struct SymbolParam {
+    /// Name of the `plugins.js` parameter.
+    param: String,
+    /// `switch` or `variable`.
+    kind: String,
+}
+
+/// A plugin parameter whose value is DB record id(s) of a given kind → emits a
+/// `ReferencesDbId` edge (`referential-integrity`; for `common_event` also rescues
+/// `dead-common-event`). `certain` — a curated profile is an authored declaration.
+#[derive(Debug, Clone, Default, serde::Deserialize)]
+#[serde(default)]
+struct DbParam {
+    /// Name of the `plugins.js` parameter.
+    param: String,
+    /// Record kind (`actor`/`item`/`state`/`common_event`/… — as in `@type <db>`).
+    kind: String,
+}
+
+/// Convenience form of [`DbParam`] fixed to `kind = common_event`.
+#[derive(Debug, Clone, Default, serde::Deserialize)]
+#[serde(default)]
+struct CommonEventParam {
+    /// Name of the `plugins.js` parameter.
+    param: String,
+}
+
+/// A plugin parameter whose value is asset path(s) loaded at runtime → marked
+/// plugin-provided (not broken, not orphan).
+#[derive(Debug, Clone, Default, serde::Deserialize)]
+#[serde(default)]
+struct AssetParam {
+    /// Name of the `plugins.js` parameter.
+    param: String,
+    /// Standard kind-folder label (as in [`folder_to_kind`]), e.g. `img/pictures`.
+    kind: String,
+    /// Whether the value is a path array.
+    array: bool,
+}
+
+/// A glob of assets the plugin loads by name at runtime (busts, HD packs). Present
+/// files matching it are plugin-provided, not orphans. Quality-gated against
+/// whole-folder over-suppression (see [`is_overbroad_glob`]).
+#[derive(Debug, Clone, Default, serde::Deserialize)]
+#[serde(default)]
+struct AssetPattern {
+    /// Glob over `folder/name` (e.g. `img/pictures/busts/*`).
+    glob: String,
+}
+
+/// A command the plugin registers dynamically (invisible to Tier A/B annotation
+/// parsing). Declaring it lets `unknown-plugin-command` resolve calls to it.
+#[derive(Debug, Clone, Default, serde::Deserialize)]
+#[serde(default)]
+struct PluginCommandDecl {
+    /// Command name (matches the 356/357 command token).
+    command: String,
+}
+
+/// Load-order overrides for a plugin that omits `@base`/`@orderAfter`/`@orderBefore`
+/// in its header.
+#[derive(Debug, Clone, Default, serde::Deserialize)]
+#[serde(default)]
+struct DependencyDecl {
+    /// `@base`-equivalent hard dependencies.
+    base: Vec<String>,
+    /// `@orderAfter`-equivalent.
+    order_after: Vec<String>,
+    /// `@orderBefore`-equivalent.
+    order_before: Vec<String>,
+}
+
+impl DependencyDecl {
+    fn is_empty(&self) -> bool {
+        self.base.is_empty() && self.order_after.is_empty() && self.order_before.is_empty()
+    }
+}
+
 /// Profile of a single plugin (TOML).
 #[derive(Debug, Clone, Default, serde::Deserialize)]
 #[serde(default)]
@@ -80,6 +178,26 @@ struct Profile {
     /// The TOML key is `[[map_param]]` (singular).
     #[serde(rename = "map_param")]
     map_params: Vec<MapParam>,
+    /// Parameters whose values are switch/variable ids (TOML `[[symbol_param]]`).
+    #[serde(rename = "symbol_param")]
+    symbol_params: Vec<SymbolParam>,
+    /// Parameters whose values are DB record ids (TOML `[[db_param]]`).
+    #[serde(rename = "db_param")]
+    db_params: Vec<DbParam>,
+    /// Parameters whose values are common-event ids (TOML `[[common_event_param]]`).
+    #[serde(rename = "common_event_param")]
+    common_event_params: Vec<CommonEventParam>,
+    /// Parameters whose values are asset paths (TOML `[[asset_param]]`).
+    #[serde(rename = "asset_param")]
+    asset_params: Vec<AssetParam>,
+    /// Globs of runtime-loaded assets (TOML `[[asset_pattern]]`).
+    #[serde(rename = "asset_pattern")]
+    asset_patterns: Vec<AssetPattern>,
+    /// Dynamically registered commands (TOML `[[plugin_command]]`).
+    #[serde(rename = "plugin_command")]
+    plugin_commands: Vec<PluginCommandDecl>,
+    /// Load-order overrides (TOML `[dependency]`).
+    dependency: DependencyDecl,
 }
 
 /// Decodes a `@type number[]` value (a JSON string-array) into a set of map ids.
@@ -96,6 +214,41 @@ fn decode_map_ids(value: &str) -> Vec<u32> {
         return arr.iter().filter(|&&n| n > 0).map(|&n| n as u32).collect();
     }
     Vec::new()
+}
+
+/// Maps a `db_param.kind` string to a [`DbKind`] (same vocabulary as `@type <db>`).
+fn db_kind_from_str(s: &str) -> Option<DbKind> {
+    Some(match s.trim().to_ascii_lowercase().as_str() {
+        "actor" => DbKind::Actor,
+        "class" => DbKind::Class,
+        "skill" => DbKind::Skill,
+        "item" => DbKind::Item,
+        "weapon" => DbKind::Weapon,
+        "armor" => DbKind::Armor,
+        "enemy" => DbKind::Enemy,
+        "troop" => DbKind::Troop,
+        "state" => DbKind::State,
+        "animation" => DbKind::Animation,
+        "tileset" => DbKind::Tileset,
+        "common_event" | "commonevent" => DbKind::CommonEvent,
+        _ => return None,
+    })
+}
+
+/// Quality-gate for `[[asset_pattern]]`: rejects globs that would suppress an
+/// entire standard asset folder. A bare wildcard tail (`*`/`**`) is allowed only
+/// once the glob has drilled into a subfolder (≥4 path segments, e.g.
+/// `img/pictures/busts/*`); `img/pictures/*` or `audio/se/**` are over-broad.
+/// A glob with a non-wildcard final segment (`img/pictures/logo`, `audio/se/a*_*`)
+/// is always specific enough.
+fn is_overbroad_glob(glob: &str) -> bool {
+    let g = glob.trim();
+    let segs: Vec<&str> = g.split('/').filter(|s| !s.is_empty()).collect();
+    let Some(last) = segs.last() else {
+        return true; // empty
+    };
+    let pure_wildcard = *last == "*" || *last == "**";
+    pure_wildcard && segs.len() <= 3
 }
 
 /// Project config `.dk-doctor/config.toml`.
@@ -189,14 +342,18 @@ fn load_profiles(project_root: &Utf8Path, warns: &mut Vec<String>) -> Vec<Profil
 /// Applies profiles and `.dk-doctor` to the facts collected in the builder.
 ///
 /// `plugins` — ALL plugins (name + `parameters` values + whether enabled), in load
-/// order. Asset facts (`asset_roots`/`provided_subdir`) apply only to ENABLED
-/// plugins; `map_param` applies to any that declare it (the parameter value is the
-/// author's explicit declaration, and `unreachable-maps` is INFO). Writes the
-/// suppressions into existing hooks (`plugin_provided_assets`/`assets_present`/`plugin_referenced_maps`).
+/// order. `plugins_js` — path of `plugins.js` relative to the project base (for
+/// profile-emitted edge locations). Asset facts (`asset_roots`/`provided_subdir`)
+/// and the curated param/command/dependency tables apply only to ENABLED plugins
+/// (they describe runtime behavior); `map_param` applies to any that declare it
+/// (the parameter value is the author's explicit declaration, and `unreachable-maps`
+/// is INFO). Writes the facts into existing hooks (`plugin_provided_assets`/
+/// `assets_present`/`plugin_referenced_maps`/symbols/edges/`plugin_meta`).
 pub fn apply(
     b: &mut IrBuilder,
     project_root: &Utf8Path,
-    plugins: &[(String, std::collections::BTreeMap<String, String>, bool)],
+    plugins_js: &Utf8Path,
+    plugins: &[crate::plugins::PluginParams],
     warns: &mut Vec<String>,
 ) {
     let config: DkConfig = read_toml(
@@ -310,11 +467,226 @@ pub fn apply(
     for key in satisfied {
         b.add_asset_present(key);
     }
+
+    // (5) Curated per-plugin param/command/dependency tables — the manual override
+    //     for what name-alias inference (Tier A) does not reach. These describe the
+    //     plugin's RUNTIME behavior, so they apply only to ENABLED plugins.
+    apply_curated_tables(b, plugins_js, plugins, &profiles, warns);
+}
+
+/// Applies the curated `[[symbol_param]]`/`[[db_param]]`/`[[common_event_param]]`/
+/// `[[asset_param]]`/`[[asset_pattern]]`/`[[plugin_command]]`/`[dependency]` tables
+/// of enabled plugins. Split out of [`apply`] for readability.
+fn apply_curated_tables(
+    b: &mut IrBuilder,
+    plugins_js: &Utf8Path,
+    plugins: &[crate::plugins::PluginParams],
+    profiles: &[Profile],
+    warns: &mut Vec<String>,
+) {
+    for (name, params, enabled) in plugins {
+        if !enabled {
+            continue;
+        }
+        let Some(profile) = profiles.iter().find(|p| &p.name == name) else {
+            continue;
+        };
+        let plugin_loc = Location::new(
+            plugins_js.to_path_buf(),
+            vec![PathSeg::Plugin(name.clone())],
+        );
+        let param_loc = |param: &str| {
+            Location::new(
+                plugins_js.to_path_buf(),
+                vec![
+                    PathSeg::Plugin(name.clone()),
+                    PathSeg::Param(param.to_string()),
+                ],
+            )
+        };
+        // Plugin entity created lazily, only if a db/common-event ref is emitted.
+        let mut plugin_entity: Option<EntityId> = None;
+
+        // Ids are decoded list-tolerantly (scalar, JSON string-array, or comma/space
+        // list) — a profile author never has to declare whether a value is an array,
+        // so a wrong flag can't silently drop ids.
+
+        // symbol_param → declared_by_plugin (suppress uninitialized-symbols).
+        for sp in &profile.symbol_params {
+            let Some(value) = params.get(&sp.param) else {
+                continue;
+            };
+            match sp.kind.trim().to_ascii_lowercase().as_str() {
+                "switch" => {
+                    for id in decode_ids(value, true) {
+                        b.symbols_mut().mark_switch_declared_by_plugin(id);
+                    }
+                }
+                "variable" => {
+                    for id in decode_ids(value, true) {
+                        b.symbols_mut().mark_variable_declared_by_plugin(id);
+                    }
+                }
+                other => warns.push(format!(
+                    "профиль {name}: symbol_param «{}» — неизвестный kind «{other}» (ожидается switch/variable)",
+                    sp.param
+                )),
+            }
+        }
+
+        // db_param + common_event_param → ReferencesDbId edges. `certain`: a curated
+        // profile is an authored declaration (like `@type <db>` in a plugin header),
+        // not a heuristic guess — and a renamed/removed param resolves to no value
+        // here, so profile drift fails safe (no edge) rather than into a false alarm.
+        let mut db_refs: Vec<(&str, DbKind)> = Vec::new();
+        for dp in &profile.db_params {
+            match db_kind_from_str(&dp.kind) {
+                Some(kind) => db_refs.push((dp.param.as_str(), kind)),
+                None => warns.push(format!(
+                    "профиль {name}: db_param «{}» — неизвестный kind «{}»",
+                    dp.param, dp.kind
+                )),
+            }
+        }
+        for cp in &profile.common_event_params {
+            db_refs.push((cp.param.as_str(), DbKind::CommonEvent));
+        }
+        for (param, kind) in db_refs {
+            let Some(value) = params.get(param) else {
+                continue;
+            };
+            let ids = decode_ids(value, true);
+            if ids.is_empty() {
+                continue;
+            }
+            let from = *plugin_entity.get_or_insert_with(|| {
+                b.push_entity(
+                    Entity::Plugin(PluginRef { name: name.clone() }),
+                    plugin_loc.clone(),
+                )
+            });
+            let loc = param_loc(param);
+            for id in ids {
+                b.push_edge(from, Edge::ReferencesDbId { kind, id }, loc.clone());
+            }
+        }
+
+        // asset_param → plugin-provided assets (not broken / not orphan).
+        for ap in &profile.asset_params {
+            let Some(value) = params.get(&ap.param) else {
+                continue;
+            };
+            let Some(kind) = folder_to_kind(&ap.kind) else {
+                warns.push(format!(
+                    "профиль {name}: asset_param «{}» — неизвестная папка «{}»",
+                    ap.param, ap.kind
+                ));
+                continue;
+            };
+            for nm in decode_files(value, ap.array) {
+                b.add_plugin_provided_asset(AssetKey::new(kind, nm));
+            }
+        }
+
+        // asset_pattern → present files matching the glob are plugin-provided
+        // (not orphans). Quality-gated against whole-folder over-suppression.
+        for pat in &profile.asset_patterns {
+            if is_overbroad_glob(&pat.glob) {
+                warns.push(format!(
+                    "профиль {name}: asset_pattern «{}» слишком широкий (подавил бы целую папку) — пропущен",
+                    pat.glob
+                ));
+                continue;
+            }
+            let matches: Vec<AssetKey> = b
+                .assets_present()
+                .iter()
+                .filter(|k| glob_match(&pat.glob, &format!("{}/{}", k.kind.folder(), k.name)))
+                .cloned()
+                .collect();
+            for key in matches {
+                b.add_plugin_provided_asset(key);
+            }
+        }
+
+        // plugin_command → add the command to the registry so a call to it resolves.
+        // We deliberately do NOT mark the plugin `command_registry_known`: a profile
+        // lists only the commands the author documents, not the whole set, so
+        // asserting completeness would make `unknown-plugin-command` flag real-but-
+        // unlisted commands. A profile ADDS facts, it never over-claims — completeness
+        // stays Tier B's job (it inspects the full plugin source).
+        for pc in &profile.plugin_commands {
+            let cmd = pc.command.trim();
+            if cmd.is_empty() {
+                continue;
+            }
+            let meta = b.plugin_meta_mut();
+            let entry = PluginCommand {
+                plugin: name.clone(),
+                command: cmd.to_string(),
+            };
+            if !meta.commands.contains(&entry) {
+                meta.commands.push(entry);
+            }
+        }
+
+        // dependency → order declarations (merge into an existing record if any).
+        // Extend without duplicating — a profile that repeats a header-declared dep
+        // must not double it (which would double downstream load-order findings).
+        if !profile.dependency.is_empty() {
+            let dep = &profile.dependency;
+            let meta = b.plugin_meta_mut();
+            let extend_unique = |dst: &mut Vec<String>, src: &[String]| {
+                for s in src {
+                    if !dst.contains(s) {
+                        dst.push(s.clone());
+                    }
+                }
+            };
+            if let Some(existing) = meta.order_deps.iter_mut().find(|d| &d.plugin == name) {
+                extend_unique(&mut existing.base, &dep.base);
+                extend_unique(&mut existing.order_after, &dep.order_after);
+                extend_unique(&mut existing.order_before, &dep.order_before);
+            } else {
+                meta.order_deps.push(PluginOrderDeps {
+                    plugin: name.clone(),
+                    base: dep.base.clone(),
+                    order_after: dep.order_after.clone(),
+                    order_before: dep.order_before.clone(),
+                });
+            }
+        }
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// `plugins.js` path used for profile-emitted edge locations in tests.
+    fn pjs() -> &'static Utf8Path {
+        Utf8Path::new("js/plugins.js")
+    }
+
+    /// Writes a per-plugin profile TOML into `<root>/.dk-doctor/plugins/<name>.toml`.
+    fn write_profile(root: &std::path::Path, name: &str, body: &str) {
+        let dir = root.join(".dk-doctor").join("plugins");
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join(format!("{name}.toml")), body).unwrap();
+    }
+
+    /// A single plugin with multiple `param=value` pairs and an enabled status.
+    fn plugin_multi(
+        name: &str,
+        pairs: &[(&str, &str)],
+        enabled: bool,
+    ) -> Vec<(String, std::collections::BTreeMap<String, String>, bool)> {
+        let params = pairs
+            .iter()
+            .map(|(k, v)| (k.to_string(), v.to_string()))
+            .collect();
+        vec![(name.to_string(), params, enabled)]
+    }
 
     #[test]
     fn glob_matches_voice_namespace() {
@@ -355,7 +727,7 @@ mod tests {
         );
         let mut warns = Vec::new();
         let root = camino::Utf8PathBuf::from_path_buf(root).unwrap();
-        apply(&mut b, &root, &[], &mut warns);
+        apply(&mut b, &root, pjs(), &[], &mut warns);
         let ir = b.finish();
         // voice is suppressed (in plugin_provided_assets), Ghost is not.
         assert!(
@@ -386,7 +758,7 @@ mod tests {
         b.add_asset_present(AssetKey::new(AssetKind::Picture, "ru/Title"));
         let mut warns = Vec::new();
         let root = camino::Utf8PathBuf::from_path_buf(root).unwrap();
-        apply(&mut b, &root, &[], &mut warns);
+        apply(&mut b, &root, pjs(), &[], &mut warns);
         let ir = b.finish();
         // The Title base is now considered present.
         assert!(
@@ -434,6 +806,7 @@ mod tests {
         apply(
             &mut b,
             &root,
+            pjs(),
             &one_plugin("DK_Message_Busts", "bustsFolder", "img/pictures/busts/"),
             &mut warns,
         );
@@ -466,6 +839,7 @@ mod tests {
         apply(
             &mut b,
             &root,
+            pjs(),
             &one_plugin("DK_Picture_Choices", "folder", "img/pictures/choices/"),
             &mut warns,
         );
@@ -495,6 +869,7 @@ mod tests {
         apply(
             &mut b,
             &root,
+            pjs(),
             &one_plugin("DK_Message_Busts", "bustsFolder", "img/pictures/"),
             &mut warns,
         );
@@ -516,6 +891,7 @@ mod tests {
             apply(
                 &mut b,
                 &root,
+                pjs(),
                 &one_plugin_status("DK_Event_Factory", "templates", "[\"2\"]", enabled),
                 &mut warns,
             );
@@ -537,8 +913,413 @@ mod tests {
         let mut b = Ir::builder(Engine::Mz);
         b.add_asset_present(AssetKey::new(AssetKind::Picture, "busts/A"));
         let mut warns = Vec::new();
-        apply(&mut b, &root, &[], &mut warns);
+        apply(&mut b, &root, pjs(), &[], &mut warns);
         let ir = b.finish();
         assert!(ir.plugin_provided_assets.is_empty());
+    }
+
+    #[test]
+    fn overbroad_glob_gate() {
+        // Whole-folder wildcards are rejected; drilled-in / literal globs pass.
+        for g in ["img/pictures/*", "audio/se/**", "img/**", "movies/*", ""] {
+            assert!(is_overbroad_glob(g), "{g:?} should be over-broad");
+        }
+        for g in [
+            "img/pictures/busts/*",
+            "img/pictures/logo",
+            "audio/se/a*_*",
+            "img/pictures/portraits/**",
+        ] {
+            assert!(!is_overbroad_glob(g), "{g:?} should be specific enough");
+        }
+    }
+
+    #[test]
+    fn symbol_param_marks_declared_and_warns_on_bad_kind() {
+        use dk_doctor_core::ir::{Engine, Ir};
+        let root = std::env::temp_dir().join(format!("dksymparam{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        write_profile(
+            root.as_path(),
+            "TimeCore",
+            r#"name = "TimeCore"
+[[symbol_param]]
+param = "gaugeSwitch"
+kind = "switch"
+[[symbol_param]]
+param = "counters"
+kind = "variable"
+[[symbol_param]]
+param = "weird"
+kind = "bogus"
+"#,
+        );
+        let root = camino::Utf8PathBuf::from_path_buf(root).unwrap();
+        let mut b = Ir::builder(Engine::Mz);
+        let mut warns = Vec::new();
+        apply(
+            &mut b,
+            &root,
+            pjs(),
+            &plugin_multi(
+                "TimeCore",
+                &[
+                    ("gaugeSwitch", "40"),
+                    ("counters", r#"["12","13"]"#),
+                    ("weird", "5"),
+                ],
+                true,
+            ),
+            &mut warns,
+        );
+        let ir = b.finish();
+        assert!(ir.symbols.switches.get(&40).unwrap().declared_by_plugin);
+        assert!(ir.symbols.variables.get(&12).unwrap().declared_by_plugin);
+        assert!(ir.symbols.variables.get(&13).unwrap().declared_by_plugin);
+        // Unknown kind → warned, and switch/var 5 not created.
+        assert!(!ir.symbols.switches.contains_key(&5));
+        assert!(!ir.symbols.variables.contains_key(&5));
+        assert!(warns.iter().any(|w| w.contains("bogus")));
+        let _ = std::fs::remove_dir_all(root.as_std_path());
+    }
+
+    #[test]
+    fn db_and_common_event_params_emit_refs() {
+        use dk_doctor_core::ir::{DbKind, Edge, Engine, Entity, Ir};
+        let root = std::env::temp_dir().join(format!("dkdbparam{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        write_profile(
+            root.as_path(),
+            "Loc",
+            r#"name = "Loc"
+[[db_param]]
+param = "reviveItem"
+kind = "item"
+[[common_event_param]]
+param = "onStart"
+"#,
+        );
+        let root = camino::Utf8PathBuf::from_path_buf(root).unwrap();
+        let mut b = Ir::builder(Engine::Mz);
+        let mut warns = Vec::new();
+        apply(
+            &mut b,
+            &root,
+            pjs(),
+            &plugin_multi("Loc", &[("reviveItem", "99"), ("onStart", "7")], true),
+            &mut warns,
+        );
+        let ir = b.finish();
+        let db_refs: Vec<(DbKind, u32)> = ir
+            .edges
+            .iter()
+            .filter_map(|r| match r.edge {
+                Edge::ReferencesDbId { kind, id } => Some((kind, id)),
+                _ => None,
+            })
+            .collect();
+        assert!(db_refs.contains(&(DbKind::Item, 99)));
+        assert!(db_refs.contains(&(DbKind::CommonEvent, 7)));
+        // Edge location points at the offending parameter in plugins.js.
+        let ce_edge = ir
+            .edges
+            .iter()
+            .find(|r| {
+                matches!(
+                    r.edge,
+                    Edge::ReferencesDbId {
+                        kind: DbKind::CommonEvent,
+                        ..
+                    }
+                )
+            })
+            .unwrap();
+        assert_eq!(
+            ce_edge.location.path.to_string(),
+            "plugin:Loc/param:onStart"
+        );
+        // A single lazy Plugin entity for both refs.
+        assert_eq!(
+            ir.entities
+                .iter()
+                .filter(|n| matches!(n.kind, Entity::Plugin(_)))
+                .count(),
+            1
+        );
+        let _ = std::fs::remove_dir_all(root.as_std_path());
+    }
+
+    #[test]
+    fn asset_param_marks_provided() {
+        use dk_doctor_core::ir::{Engine, Ir};
+        let root = std::env::temp_dir().join(format!("dkassetparam{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        write_profile(
+            root.as_path(),
+            "Portraits",
+            r#"name = "Portraits"
+[[asset_param]]
+param = "logo"
+kind = "img/pictures"
+"#,
+        );
+        let root = camino::Utf8PathBuf::from_path_buf(root).unwrap();
+        let mut b = Ir::builder(Engine::Mz);
+        let mut warns = Vec::new();
+        apply(
+            &mut b,
+            &root,
+            pjs(),
+            &plugin_multi("Portraits", &[("logo", "Splash")], true),
+            &mut warns,
+        );
+        let ir = b.finish();
+        assert!(
+            ir.plugin_provided_assets
+                .contains(&AssetKey::new(AssetKind::Picture, "Splash"))
+        );
+        let _ = std::fs::remove_dir_all(root.as_std_path());
+    }
+
+    #[test]
+    fn asset_pattern_suppresses_present_and_skips_overbroad() {
+        use dk_doctor_core::ir::{Engine, Ir};
+        let root = std::env::temp_dir().join(format!("dkassetpat{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        write_profile(
+            root.as_path(),
+            "Busts",
+            r#"name = "Busts"
+[[asset_pattern]]
+glob = "img/pictures/portraits/*"
+[[asset_pattern]]
+glob = "img/pictures/*"
+"#,
+        );
+        let root = camino::Utf8PathBuf::from_path_buf(root).unwrap();
+        let mut b = Ir::builder(Engine::Mz);
+        b.add_asset_present(AssetKey::new(AssetKind::Picture, "portraits/Hero"));
+        b.add_asset_present(AssetKey::new(AssetKind::Picture, "Normal")); // control
+        let mut warns = Vec::new();
+        apply(
+            &mut b,
+            &root,
+            pjs(),
+            &plugin_multi("Busts", &[], true),
+            &mut warns,
+        );
+        let ir = b.finish();
+        // Drilled-in glob suppresses the subfolder file...
+        assert!(
+            ir.plugin_provided_assets
+                .contains(&AssetKey::new(AssetKind::Picture, "portraits/Hero"))
+        );
+        // ...but the over-broad `img/pictures/*` is rejected (Normal stays an orphan candidate).
+        assert!(
+            !ir.plugin_provided_assets
+                .contains(&AssetKey::new(AssetKind::Picture, "Normal"))
+        );
+        assert!(warns.iter().any(|w| w.contains("слишком широкий")));
+        let _ = std::fs::remove_dir_all(root.as_std_path());
+    }
+
+    #[test]
+    fn plugin_command_registers_without_claiming_completeness() {
+        use dk_doctor_core::ir::{Engine, Ir};
+        let root = std::env::temp_dir().join(format!("dkplugincmd{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        write_profile(
+            root.as_path(),
+            "Spawner",
+            r#"name = "Spawner"
+[[plugin_command]]
+command = "spawnEvent"
+"#,
+        );
+        let root = camino::Utf8PathBuf::from_path_buf(root).unwrap();
+        let mut b = Ir::builder(Engine::Mz);
+        let mut warns = Vec::new();
+        apply(
+            &mut b,
+            &root,
+            pjs(),
+            &plugin_multi("Spawner", &[], true),
+            &mut warns,
+        );
+        let ir = b.finish();
+        // The declared command resolves...
+        assert!(
+            ir.plugin_meta
+                .commands
+                .iter()
+                .any(|c| c.plugin == "Spawner" && c.command == "spawnEvent")
+        );
+        // ...but the plugin is NOT asserted complete: a profile lists a subset, so
+        // marking registry_known would false-flag real-but-unlisted commands.
+        assert!(
+            !ir.plugin_meta
+                .command_registry_known
+                .contains(&"Spawner".to_string())
+        );
+        let _ = std::fs::remove_dir_all(root.as_std_path());
+    }
+
+    #[test]
+    fn dependency_adds_order_deps() {
+        use dk_doctor_core::ir::{Engine, Ir};
+        let root = std::env::temp_dir().join(format!("dkdep{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        write_profile(
+            root.as_path(),
+            "Dep",
+            r#"name = "Dep"
+[dependency]
+base = ["CoreEngine"]
+order_after = ["OtherPlugin"]
+"#,
+        );
+        let root = camino::Utf8PathBuf::from_path_buf(root).unwrap();
+        let mut b = Ir::builder(Engine::Mz);
+        let mut warns = Vec::new();
+        apply(
+            &mut b,
+            &root,
+            pjs(),
+            &plugin_multi("Dep", &[], true),
+            &mut warns,
+        );
+        let ir = b.finish();
+        let deps = ir
+            .plugin_meta
+            .order_deps
+            .iter()
+            .find(|d| d.plugin == "Dep")
+            .expect("order deps for Dep");
+        assert_eq!(deps.base, vec!["CoreEngine".to_string()]);
+        assert_eq!(deps.order_after, vec!["OtherPlugin".to_string()]);
+        let _ = std::fs::remove_dir_all(root.as_std_path());
+    }
+
+    #[test]
+    fn dependency_merges_into_existing_record_without_duplicates() {
+        use dk_doctor_core::ir::{Engine, Ir, PluginOrderDeps};
+        let root = std::env::temp_dir().join(format!("dkdepmerge{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        // Profile repeats a header-declared base ("Header1") and adds a new one.
+        write_profile(
+            root.as_path(),
+            "Dep",
+            r#"name = "Dep"
+[dependency]
+base = ["Header1", "Extra"]
+"#,
+        );
+        let root = camino::Utf8PathBuf::from_path_buf(root).unwrap();
+        let mut b = Ir::builder(Engine::Mz);
+        // Simulate collect() having parsed a header @base Header1.
+        b.plugin_meta_mut().order_deps.push(PluginOrderDeps {
+            plugin: "Dep".to_string(),
+            base: vec!["Header1".to_string()],
+            order_after: Vec::new(),
+            order_before: Vec::new(),
+        });
+        let mut warns = Vec::new();
+        apply(
+            &mut b,
+            &root,
+            pjs(),
+            &plugin_multi("Dep", &[], true),
+            &mut warns,
+        );
+        let ir = b.finish();
+        let deps = ir
+            .plugin_meta
+            .order_deps
+            .iter()
+            .find(|d| d.plugin == "Dep")
+            .expect("order deps for Dep");
+        // Merged into the SAME record, "Header1" not duplicated.
+        assert_eq!(
+            deps.base,
+            vec!["Header1".to_string(), "Extra".to_string()],
+            "merge must dedup the repeated header dep"
+        );
+        assert_eq!(
+            ir.plugin_meta
+                .order_deps
+                .iter()
+                .filter(|d| d.plugin == "Dep")
+                .count(),
+            1,
+            "no second order_deps record for the same plugin"
+        );
+        let _ = std::fs::remove_dir_all(root.as_std_path());
+    }
+
+    #[test]
+    fn curated_tables_inactive_when_plugin_disabled() {
+        use dk_doctor_core::ir::{Engine, Ir};
+        let root = std::env::temp_dir().join(format!("dkcurateoff{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        write_profile(
+            root.as_path(),
+            "TimeCore",
+            r#"name = "TimeCore"
+[[symbol_param]]
+param = "gaugeSwitch"
+kind = "switch"
+"#,
+        );
+        let root = camino::Utf8PathBuf::from_path_buf(root).unwrap();
+        let mut b = Ir::builder(Engine::Mz);
+        let mut warns = Vec::new();
+        apply(
+            &mut b,
+            &root,
+            pjs(),
+            &plugin_multi("TimeCore", &[("gaugeSwitch", "40")], false), // disabled
+            &mut warns,
+        );
+        let ir = b.finish();
+        assert!(
+            !ir.symbols.switches.contains_key(&40),
+            "disabled plugin does not manage symbols at runtime"
+        );
+        let _ = std::fs::remove_dir_all(root.as_std_path());
+    }
+
+    #[test]
+    fn builtin_profiles_pass_quality_gate() {
+        // Every compiled-in profile must parse, be named, and declare only
+        // resolvable kinds / non-over-broad globs (governance checklist).
+        for src in BUILTIN_PROFILES {
+            let p: Profile = toml::from_str(src).expect("built-in profile parses");
+            assert!(!p.name.is_empty(), "built-in profile must have a name");
+            for sp in &p.symbol_params {
+                let k = sp.kind.trim().to_ascii_lowercase();
+                assert!(k == "switch" || k == "variable", "symbol_param kind {k}");
+            }
+            for dp in &p.db_params {
+                assert!(
+                    db_kind_from_str(&dp.kind).is_some(),
+                    "db_param kind {}",
+                    dp.kind
+                );
+            }
+            for ap in &p.asset_params {
+                assert!(
+                    folder_to_kind(&ap.kind).is_some(),
+                    "asset_param kind {}",
+                    ap.kind
+                );
+            }
+            for pat in &p.asset_patterns {
+                assert!(
+                    !is_overbroad_glob(&pat.glob),
+                    "over-broad glob {}",
+                    pat.glob
+                );
+            }
+        }
     }
 }
