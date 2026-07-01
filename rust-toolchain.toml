@@ -1,13 +1,19 @@
-# Toolchain pin для воспроизводимой сборки.
+# Host-neutral Rust toolchain pin for reproducible builds.
 #
-# MSVC C++ Build Tools + Windows SDK установлены (2026-06-28), поэтому используется
-# штатный MSVC-ABI `x86_64-pc-windows-msvc`: чистая дистрибуция exe (без bundling
-# libunwind.dll/std-*.dll), release-exe не лочится антивирусом. rustc сам находит
-# cl.exe/link.exe + SDK через установку VS Build Tools (dev-prompt не нужен).
+# Pin an explicit version, NOT a host-specific channel name. rustup treats a
+# value like `stable-x86_64-pc-windows-msvc` as a toolchain *name*, so it fails
+# to resolve on non-Windows hosts (the macOS CI leg, a contributor on Linux) and
+# also re-resolves the moving `stable` channel over the network. A bare version
+# is host-neutral: on each platform it resolves to that platform's native
+# toolchain. On Windows the default host is the MSVC ABI
+# (`x86_64-pc-windows-msvc`), which keeps producing a clean exe — no gnullvm
+# libunwind/std DLL bundling, no AV lock on the release binary.
 #
-# Fallback на самодостаточный gnullvm (если MSVC снести): channel =
-# "stable-x86_64-pc-windows-gnullvm" — линкер для него настроен в .cargo/config.toml
-# (блок привязан к таргету gnullvm и при MSVC-сборке не применяется).
+# Cross-compilation targets (e.g. macOS in the desktop workflow) are installed
+# separately by CI / release scripts.
+#
+# The gnullvm fallback in .cargo/config.toml stays as-is: its linker settings are
+# scoped to the gnullvm target and do not apply to an MSVC build.
 [toolchain]
-channel = "stable-x86_64-pc-windows-msvc"
+channel = "1.96.0"
 components = ["rustfmt", "clippy"]
