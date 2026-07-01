@@ -1,7 +1,11 @@
-# Host-neutral toolchain pin for the Tauri desktop app, kept in sync with the
-# repository root. A bare version (not a host-specific channel name) resolves to
-# each host's native toolchain, so the macOS CI leg builds without tripping over
-# a Windows-only toolchain name, and offline checks do not re-resolve `stable`.
+# Host-neutral toolchain pin for the Tauri desktop app.
+#
+# Keep this on `stable`, NOT a fixed version. The desktop CI workflows install
+# the macOS cross-targets (aarch64/x86_64-apple-darwin) onto the `stable`
+# toolchain via dtolnay/rust-toolchain@stable. Pinning a specific version here
+# makes the build run under a different toolchain that lacks those targets, so
+# `tauri build --target universal-apple-darwin` fails ("target not installed").
+# A bare `stable` is also host-neutral (unlike a `stable-<triple>` name), so the
+# macOS leg still resolves its native toolchain.
 [toolchain]
-channel = "1.96.0"
-components = ["rustfmt", "clippy"]
+channel = "stable"
