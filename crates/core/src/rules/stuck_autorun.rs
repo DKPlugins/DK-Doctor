@@ -46,7 +46,8 @@ pub struct StuckAutorun;
 ///    unambiguous "turn-off", so only the plugin signal counts).
 ///
 /// A self-switch condition is not considered here: its clearing is tracked
-/// separately via the event's self-switch write (`event_writes_self_switch`).
+/// separately via a self-switch write on the same page
+/// (`pages_with_self_switch_write`).
 fn gating_condition_clearable(ctx: &RuleCtx<'_>, cond: &crate::ir::PageConditions) -> bool {
     let switch_clearable = |id: u32| match ctx.ir.symbols.switches.get(&id) {
         // No entry in the table ⇒ the switch is never written ⇒ never ON ⇒
@@ -79,14 +80,17 @@ impl Rule for StuckAutorun {
         // Precomputations (one pass each) — otherwise the rule was quadratic on
         // large projects: the self-switch check ran over the whole table for EVERY
         // event, and the presence of an "exit" — over all edges for EVERY page.
-        // (1) events (map,event) that write a self-switch somewhere.
-        let events_with_self_switch_write: FxHashSet<(u32, u32)> = ctx
+        // (1) page entities that write a self-switch.  A self-switch write only
+        // proves that the currently analyzed autorun page can turn itself off if
+        // the write is reachable from that same page.  Another page of the same
+        // event can be selected under different conditions (or shadow the autorun)
+        // and must not suppress a stuck-autorun finding for this page.
+        let pages_with_self_switch_write: FxHashSet<EntityId> = ctx
             .ir
             .self_switches
             .entries
-            .iter()
-            .filter(|(_, info)| !info.writes.is_empty())
-            .map(|(k, _)| (k.map_id, k.event_id))
+            .values()
+            .flat_map(|info| info.writes.iter().map(|site| site.entity))
             .collect();
         // (2) page entities with an "exit" edge (switch write / player transfer).
         let pages_with_exit: FxHashSet<EntityId> = ctx
@@ -98,13 +102,7 @@ impl Rule for StuckAutorun {
             .collect();
 
         let mut findings = Vec::new();
-        for ((map_id, event_id), pages) in pages_by_event(ctx.ir) {
-            // Does any of the event's commands write a self-switch (any channel)?
-            // The self-switch table is keyed by (map,event,ch) without binding to
-            // a specific page, so an event-level check is enough.
-            let event_writes_self_switch =
-                events_with_self_switch_write.contains(&(map_id, event_id));
-
+        for (_, pages) in pages_by_event(ctx.ir) {
             for page in &pages {
                 // Autorun only: it blocks input → a non-terminating Autorun
                 // hangs the game (soft-lock) = a real bug. A Parallel page
@@ -125,7 +123,7 @@ impl Rule for StuckAutorun {
                 if !gated {
                     continue;
                 }
-                if event_writes_self_switch {
+                if pages_with_self_switch_write.contains(&page.entity) {
                     continue;
                 }
                 // The page calls a common event / plugin command / script
@@ -237,7 +235,7 @@ mod tests {
     fn spares_autorun_that_writes_self_switch() {
         let mut b = Ir::builder(Engine::Mz);
         let pe = push_page(&mut b, 1, 5, 1, PageTrigger::Autorun, gated());
-        // The event writes self-switch 'A' somewhere → an exit is possible.
+        // The autorun page writes self-switch 'A' → an exit is possible.
         b.add_self_switch_write(
             SelfSwitchKey::new(1, 5, 'A'),
             Site {
@@ -247,6 +245,37 @@ mod tests {
         );
         let ir = b.finish();
         assert!(StuckAutorun.run(&RuleCtx::new(&ir)).is_empty());
+    }
+
+    #[test]
+    fn self_switch_write_on_another_page_does_not_suppress_autorun() {
+        let mut b = Ir::builder(Engine::Mz);
+        let autorun = push_page(&mut b, 1, 5, 1, PageTrigger::Autorun, gated());
+        let action = push_page(
+            &mut b,
+            1,
+            5,
+            2,
+            PageTrigger::Action,
+            PageConditions::default(),
+        );
+        // A different page of the same event can write the self-switch, but that
+        // does not make the autorun page terminate.
+        b.add_self_switch_write(
+            SelfSwitchKey::new(1, 5, 'A'),
+            Site {
+                location: Location::file_only("data/Map001.json"),
+                entity: action,
+            },
+        );
+        let ir = b.finish();
+        let f = StuckAutorun.run(&RuleCtx::new(&ir));
+        assert_eq!(f.len(), 1);
+        assert!(matches!(
+            f[0].message,
+            Msg::StuckAutorun { page: 1, event: 5 }
+        ));
+        assert_ne!(autorun, action);
     }
 
     #[test]

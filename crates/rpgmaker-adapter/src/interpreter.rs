@@ -360,7 +360,7 @@ fn interpret(b: &mut IrBuilder, ctx: &WalkCtx, cmd: &EventCommand, idx: u32, env
             }
         }
 
-        codes::CHANGE_EQUIPMENT => db_ref0(b, ctx, DbKind::Actor, cmd, idx),
+        codes::CHANGE_EQUIPMENT => change_equipment(b, ctx, cmd, idx),
         codes::CHANGE_NAME => db_ref0(b, ctx, DbKind::Actor, cmd, idx),
         codes::CHANGE_NICKNAME => db_ref0(b, ctx, DbKind::Actor, cmd, idx),
         codes::CHANGE_PROFILE => db_ref0(b, ctx, DbKind::Actor, cmd, idx),
@@ -627,7 +627,7 @@ fn conditional_branch(
     ctx: &WalkCtx,
     cmd: &EventCommand,
     idx: u32,
-    env: &ConstEnv,
+    env: &mut ConstEnv,
 ) {
     let Some(ty) = cmd.as_u64(0) else { return };
     match ty {
@@ -691,9 +691,13 @@ fn conditional_branch(
         9 => db_ref1(b, ctx, DbKind::Weapon, cmd, idx),
         10 => db_ref1(b, ctx, DbKind::Armor, cmd, idx),
         // 12 — script condition: [1]=raw JS. Blackbox + Tier B extraction of writes.
+        // The expression is evaluated by the engine as arbitrary JavaScript, so it
+        // may mutate variables as a side effect; clear constant propagation just
+        // like for an explicit 355 script block.
         12 => {
             if let Some(s) = cmd.as_str(1) {
                 script_block(b, ctx, s, idx);
+                env.clear();
             }
         }
         _ => {}
@@ -786,6 +790,11 @@ fn control_variables(
         && let Some(s) = cmd.as_str(4)
     {
         script_block(b, ctx, s, idx);
+        // The script operand is evaluated as arbitrary JavaScript. Besides
+        // producing the target value, it may call $gameVariables.setValue or
+        // otherwise mutate game state, so any previously propagated constants are
+        // no longer trustworthy.
+        env.clear();
     }
 
     // Update constant propagation. We support only assignment (operation
@@ -929,6 +938,25 @@ fn actor_ex_extra_db(
     {
         db_ref(b, ctx, kind, id as u32, idx);
     }
+}
+
+fn change_equipment(b: &mut IrBuilder, ctx: &WalkCtx, cmd: &EventCommand, idx: u32) {
+    // 319 Change Equipment: [0]=actorId, [1]=equip slot, [2]=itemId.
+    // Slot 1 is the weapon slot in the default RPG Maker equip model; other
+    // slots hold armor entries. Slot 0 is not a valid equip slot in event data.
+    db_ref0(b, ctx, DbKind::Actor, cmd, idx);
+    let (Some(slot), Some(id)) = (cmd.as_u64(1), cmd.as_u64(2)) else {
+        return;
+    };
+    if id == 0 || slot == 0 {
+        return;
+    }
+    let kind = if slot == 1 {
+        DbKind::Weapon
+    } else {
+        DbKind::Armor
+    };
+    db_ref(b, ctx, kind, id as u32, idx);
 }
 
 fn change_actor_images(b: &mut IrBuilder, ctx: &WalkCtx, cmd: &EventCommand, idx: u32) {

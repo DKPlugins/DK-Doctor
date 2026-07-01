@@ -265,6 +265,38 @@ mod tests {
     }
 
     #[test]
+    fn change_equipment_references_actor_and_item() {
+        let list = cmds(vec![
+            // Slot 1 is weapon.
+            json!({"code":319,"indent":0,"parameters":[3,1,7]}),
+            // Other equip slots are armor.
+            json!({"code":319,"indent":0,"parameters":[3,2,8]}),
+        ]);
+        let ir = run(&list).finish();
+        assert!(ir.edges.iter().any(|r| matches!(
+            r.edge,
+            Edge::ReferencesDbId {
+                kind: DbKind::Actor,
+                id: 3
+            }
+        )));
+        assert!(ir.edges.iter().any(|r| matches!(
+            r.edge,
+            Edge::ReferencesDbId {
+                kind: DbKind::Weapon,
+                id: 7
+            }
+        )));
+        assert!(ir.edges.iter().any(|r| matches!(
+            r.edge,
+            Edge::ReferencesDbId {
+                kind: DbKind::Armor,
+                id: 8
+            }
+        )));
+    }
+
+    #[test]
     fn impossible_condition_const_eval() {
         // 122 var#1 = 10, then 111 type1 "var#1 == 5" -> always false.
         let list = cmds(vec![
