@@ -86,8 +86,6 @@ struct SymbolParam {
     param: String,
     /// `switch` or `variable`.
     kind: String,
-    /// Whether the value is an id array (JSON string-array or comma/space list).
-    array: bool,
 }
 
 /// A plugin parameter whose value is DB record id(s) of a given kind → emits a
@@ -100,8 +98,6 @@ struct DbParam {
     param: String,
     /// Record kind (`actor`/`item`/`state`/`common_event`/… — as in `@type <db>`).
     kind: String,
-    /// Whether the value is an id array.
-    array: bool,
 }
 
 /// Convenience form of [`DbParam`] fixed to `kind = common_event`.
@@ -110,8 +106,6 @@ struct DbParam {
 struct CommonEventParam {
     /// Name of the `plugins.js` parameter.
     param: String,
-    /// Whether the value is an id array.
-    array: bool,
 }
 
 /// A plugin parameter whose value is asset path(s) loaded at runtime → marked
@@ -513,6 +507,10 @@ fn apply_curated_tables(
         // Plugin entity created lazily, only if a db/common-event ref is emitted.
         let mut plugin_entity: Option<EntityId> = None;
 
+        // Ids are decoded list-tolerantly (scalar, JSON string-array, or comma/space
+        // list) — a profile author never has to declare whether a value is an array,
+        // so a wrong flag can't silently drop ids.
+
         // symbol_param → declared_by_plugin (suppress uninitialized-symbols).
         for sp in &profile.symbol_params {
             let Some(value) = params.get(&sp.param) else {
@@ -520,12 +518,12 @@ fn apply_curated_tables(
             };
             match sp.kind.trim().to_ascii_lowercase().as_str() {
                 "switch" => {
-                    for id in decode_ids(value, sp.array) {
+                    for id in decode_ids(value, true) {
                         b.symbols_mut().mark_switch_declared_by_plugin(id);
                     }
                 }
                 "variable" => {
-                    for id in decode_ids(value, sp.array) {
+                    for id in decode_ids(value, true) {
                         b.symbols_mut().mark_variable_declared_by_plugin(id);
                     }
                 }
@@ -536,11 +534,14 @@ fn apply_curated_tables(
             }
         }
 
-        // db_param + common_event_param → ReferencesDbId edges (certain).
-        let mut db_refs: Vec<(&str, DbKind, bool)> = Vec::new();
+        // db_param + common_event_param → ReferencesDbId edges. `certain`: a curated
+        // profile is an authored declaration (like `@type <db>` in a plugin header),
+        // not a heuristic guess — and a renamed/removed param resolves to no value
+        // here, so profile drift fails safe (no edge) rather than into a false alarm.
+        let mut db_refs: Vec<(&str, DbKind)> = Vec::new();
         for dp in &profile.db_params {
             match db_kind_from_str(&dp.kind) {
-                Some(kind) => db_refs.push((dp.param.as_str(), kind, dp.array)),
+                Some(kind) => db_refs.push((dp.param.as_str(), kind)),
                 None => warns.push(format!(
                     "профиль {name}: db_param «{}» — неизвестный kind «{}»",
                     dp.param, dp.kind
@@ -548,13 +549,13 @@ fn apply_curated_tables(
             }
         }
         for cp in &profile.common_event_params {
-            db_refs.push((cp.param.as_str(), DbKind::CommonEvent, cp.array));
+            db_refs.push((cp.param.as_str(), DbKind::CommonEvent));
         }
-        for (param, kind, array) in db_refs {
+        for (param, kind) in db_refs {
             let Some(value) = params.get(param) else {
                 continue;
             };
-            let ids = decode_ids(value, array);
+            let ids = decode_ids(value, true);
             if ids.is_empty() {
                 continue;
             }
@@ -608,7 +609,12 @@ fn apply_curated_tables(
             }
         }
 
-        // plugin_command → command registry (resolve calls; enable typo detection).
+        // plugin_command → add the command to the registry so a call to it resolves.
+        // We deliberately do NOT mark the plugin `command_registry_known`: a profile
+        // lists only the commands the author documents, not the whole set, so
+        // asserting completeness would make `unknown-plugin-command` flag real-but-
+        // unlisted commands. A profile ADDS facts, it never over-claims — completeness
+        // stays Tier B's job (it inspects the full plugin source).
         for pc in &profile.plugin_commands {
             let cmd = pc.command.trim();
             if cmd.is_empty() {
@@ -622,21 +628,25 @@ fn apply_curated_tables(
             if !meta.commands.contains(&entry) {
                 meta.commands.push(entry);
             }
-            if !meta.command_registry_known.contains(name) {
-                meta.command_registry_known.push(name.clone());
-            }
         }
 
         // dependency → order declarations (merge into an existing record if any).
+        // Extend without duplicating — a profile that repeats a header-declared dep
+        // must not double it (which would double downstream load-order findings).
         if !profile.dependency.is_empty() {
             let dep = &profile.dependency;
             let meta = b.plugin_meta_mut();
+            let extend_unique = |dst: &mut Vec<String>, src: &[String]| {
+                for s in src {
+                    if !dst.contains(s) {
+                        dst.push(s.clone());
+                    }
+                }
+            };
             if let Some(existing) = meta.order_deps.iter_mut().find(|d| &d.plugin == name) {
-                existing.base.extend(dep.base.iter().cloned());
-                existing.order_after.extend(dep.order_after.iter().cloned());
-                existing
-                    .order_before
-                    .extend(dep.order_before.iter().cloned());
+                extend_unique(&mut existing.base, &dep.base);
+                extend_unique(&mut existing.order_after, &dep.order_after);
+                extend_unique(&mut existing.order_before, &dep.order_before);
             } else {
                 meta.order_deps.push(PluginOrderDeps {
                     plugin: name.clone(),
@@ -939,7 +949,6 @@ kind = "switch"
 [[symbol_param]]
 param = "counters"
 kind = "variable"
-array = true
 [[symbol_param]]
 param = "weird"
 kind = "bogus"
@@ -1115,7 +1124,7 @@ glob = "img/pictures/*"
     }
 
     #[test]
-    fn plugin_command_registers_and_marks_known() {
+    fn plugin_command_registers_without_claiming_completeness() {
         use dk_doctor_core::ir::{Engine, Ir};
         let root = std::env::temp_dir().join(format!("dkplugincmd{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&root);
@@ -1138,14 +1147,17 @@ command = "spawnEvent"
             &mut warns,
         );
         let ir = b.finish();
+        // The declared command resolves...
         assert!(
             ir.plugin_meta
                 .commands
                 .iter()
                 .any(|c| c.plugin == "Spawner" && c.command == "spawnEvent")
         );
+        // ...but the plugin is NOT asserted complete: a profile lists a subset, so
+        // marking registry_known would false-flag real-but-unlisted commands.
         assert!(
-            ir.plugin_meta
+            !ir.plugin_meta
                 .command_registry_known
                 .contains(&"Spawner".to_string())
         );
@@ -1185,6 +1197,62 @@ order_after = ["OtherPlugin"]
             .expect("order deps for Dep");
         assert_eq!(deps.base, vec!["CoreEngine".to_string()]);
         assert_eq!(deps.order_after, vec!["OtherPlugin".to_string()]);
+        let _ = std::fs::remove_dir_all(root.as_std_path());
+    }
+
+    #[test]
+    fn dependency_merges_into_existing_record_without_duplicates() {
+        use dk_doctor_core::ir::{Engine, Ir, PluginOrderDeps};
+        let root = std::env::temp_dir().join(format!("dkdepmerge{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        // Profile repeats a header-declared base ("Header1") and adds a new one.
+        write_profile(
+            root.as_path(),
+            "Dep",
+            r#"name = "Dep"
+[dependency]
+base = ["Header1", "Extra"]
+"#,
+        );
+        let root = camino::Utf8PathBuf::from_path_buf(root).unwrap();
+        let mut b = Ir::builder(Engine::Mz);
+        // Simulate collect() having parsed a header @base Header1.
+        b.plugin_meta_mut().order_deps.push(PluginOrderDeps {
+            plugin: "Dep".to_string(),
+            base: vec!["Header1".to_string()],
+            order_after: Vec::new(),
+            order_before: Vec::new(),
+        });
+        let mut warns = Vec::new();
+        apply(
+            &mut b,
+            &root,
+            pjs(),
+            &plugin_multi("Dep", &[], true),
+            &mut warns,
+        );
+        let ir = b.finish();
+        let deps = ir
+            .plugin_meta
+            .order_deps
+            .iter()
+            .find(|d| d.plugin == "Dep")
+            .expect("order deps for Dep");
+        // Merged into the SAME record, "Header1" not duplicated.
+        assert_eq!(
+            deps.base,
+            vec!["Header1".to_string(), "Extra".to_string()],
+            "merge must dedup the repeated header dep"
+        );
+        assert_eq!(
+            ir.plugin_meta
+                .order_deps
+                .iter()
+                .filter(|d| d.plugin == "Dep")
+                .count(),
+            1,
+            "no second order_deps record for the same plugin"
+        );
         let _ = std::fs::remove_dir_all(root.as_std_path());
     }
 
