@@ -1,8 +1,11 @@
-# Host-neutral toolchain pin для apps/desktop.
+# Host-neutral toolchain pin for the Tauri desktop app.
 #
-# Корневой rust-toolchain.toml пинит хост-триплет `stable-x86_64-pc-windows-msvc`,
-# который rustup подхватывает обходом вверх и для apps/desktop тоже — это ломает
-# macOS-плечо CI (там нет windows-msvc). Локальный файл переопределяет канал на
-# host-neutral `stable`, поэтому каждый хост резолвит свой родной toolchain.
+# Keep this on `stable`, NOT a fixed version. The desktop CI workflows install
+# the macOS cross-targets (aarch64/x86_64-apple-darwin) onto the `stable`
+# toolchain via dtolnay/rust-toolchain@stable. Pinning a specific version here
+# makes the build run under a different toolchain that lacks those targets, so
+# `tauri build --target universal-apple-darwin` fails ("target not installed").
+# A bare `stable` is also host-neutral (unlike a `stable-<triple>` name), so the
+# macOS leg still resolves its native toolchain.
 [toolchain]
 channel = "stable"
