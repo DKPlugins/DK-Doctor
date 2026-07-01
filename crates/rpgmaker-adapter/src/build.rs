@@ -481,12 +481,21 @@ fn load_common_events(b: &mut IrBuilder, data: &Utf8Path, warns: &mut LoadWarnin
                 loc.clone(),
             );
         }
+        // Gate for `circular-gate`: a triggered (Autorun/Parallel) common event
+        // runs only while its switch is ON; a call-triggered event (trigger 0)
+        // runs when invoked, so it is not switch-gated (empty gate).
+        let gate_switches = if ce.trigger != 0 && ce.switch_id != 0 {
+            vec![ce.switch_id]
+        } else {
+            Vec::new()
+        };
         let ctx = interpreter::WalkCtx {
             entity,
             file: Utf8PathBuf::from("data/CommonEvents.json"),
             base_path: vec![PathSeg::CommonEvent(ce.id)],
             // Common events have no self-switches.
             self_switch_scope: None,
+            gate_switches,
         };
         interpreter::walk(b, &ctx, &ce.list);
     }
@@ -683,6 +692,15 @@ fn load_one_map(
                 );
             }
 
+            // Gate for `circular-gate`: the page's global-switch activation
+            // conditions (switch1/switch2). Variable/self-switch/item/actor
+            // conditions are intentionally omitted — ignoring them only makes a
+            // setter look MORE reachable (fewer, not false, deadlock findings).
+            let gate_switches = conditions
+                .switch1
+                .into_iter()
+                .chain(conditions.switch2)
+                .collect();
             let ctx = interpreter::WalkCtx {
                 entity: page_entity,
                 file: file_path.clone(),
@@ -691,6 +709,7 @@ fn load_one_map(
                     map_id,
                     event_id: event.id,
                 }),
+                gate_switches,
             };
             interpreter::walk(b, &ctx, &page.list);
             let _ = ev_entity;
@@ -833,6 +852,9 @@ fn load_troops(b: &mut IrBuilder, data: &Utf8Path, warns: &mut LoadWarnings) {
                 base_path: base,
                 // Troop pages have no self-switches.
                 self_switch_scope: None,
+                // Battle events are not map progression gates; a switch set here is
+                // treated as freely settable (empty gate).
+                gate_switches: Vec::new(),
             };
             interpreter::walk(b, &ctx, &page.list);
         }

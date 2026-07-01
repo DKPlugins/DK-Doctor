@@ -76,6 +76,19 @@ pub fn print_dead_common_events_hint(lang: Lang) {
     println!();
 }
 
+/// Prints a hint that `circular-gate` is disabled by default (prototype).
+///
+/// The progression-deadlock detector does not track switches turned on by plugin
+/// commands, so it stays opt-in like `orphan-assets`/`dead-common-event`.
+pub fn print_circular_gates_hint(lang: Lang) {
+    println!(
+        "  {} {}",
+        render_chrome(&Chrome::HintPrefix, lang).dimmed(),
+        render_chrome(&Chrome::CircularGatesHint, lang)
+    );
+    println!();
+}
+
 /// Prints the list of project files that could not be parsed (skipped), so the
 /// report is not silently partial. A no-op when there are no warnings.
 pub fn print_parse_warnings(warnings: &[String], lang: Lang) {

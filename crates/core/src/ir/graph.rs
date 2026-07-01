@@ -50,6 +50,24 @@ pub struct VehicleStartMap {
     pub location: Location,
 }
 
+/// A place that turns a global switch **ON** (Control Switches, 121) together with
+/// the global switches that must already be ON for that place to run (its "gate":
+/// the map-event page's switch conditions, or a triggered common event's switch).
+///
+/// Produced by the adapter; consumed by the `circular-gate` rule to detect
+/// progression deadlocks — a switch whose only enablers are locked behind switches
+/// that (transitively) require it, so it can never be turned on. An **empty** gate
+/// means the setter is not switch-gated (the switch is freely settable).
+#[derive(Clone, Debug, serde::Serialize)]
+pub struct SwitchGate {
+    /// The switch this place turns ON.
+    pub switch_id: u32,
+    /// Global switches required to be ON for the place to run.
+    pub gate: Vec<u32>,
+    /// Location of the setter (for the finding's related sites).
+    pub location: Location,
+}
+
 /// Intermediate representation of the project: entity graph + typed edges
 /// + symbol table + existence indices.
 #[derive(Debug, serde::Serialize)]
@@ -108,6 +126,14 @@ pub struct Ir {
     /// `dead-common-event` (reachability) and `stuck-autorun` (a `117` that hides
     /// no exit). See [`CommonEventSummary`].
     pub common_event_summaries: FxHashMap<u32, CommonEventSummary>,
+    /// Switch-ON setters with their activation gate (121 ON writes from map-event
+    /// pages / triggered common events). Input to the `circular-gate` rule.
+    pub switch_gates: Vec<SwitchGate>,
+    /// Switches written by an opaque source with an unknown value (an event
+    /// script / plugin-command block, Tier B). `circular-gate` treats them as
+    /// freely settable, since we cannot prove they are only turned on behind a
+    /// gate.
+    pub script_written_switches: FxHashSet<u32>,
 }
 
 impl Ir {
@@ -151,6 +177,8 @@ pub struct IrBuilder {
     dead_branches: Vec<DeadBranch>,
     reserved_common_events: FxHashSet<u32>,
     opaque_common_events: FxHashSet<u32>,
+    switch_gates: Vec<SwitchGate>,
+    script_written_switches: FxHashSet<u32>,
 }
 
 impl IrBuilder {
@@ -173,6 +201,8 @@ impl IrBuilder {
             dead_branches: Vec::new(),
             reserved_common_events: FxHashSet::default(),
             opaque_common_events: FxHashSet::default(),
+            switch_gates: Vec::new(),
+            script_written_switches: FxHashSet::default(),
         }
     }
 
@@ -245,6 +275,23 @@ impl IrBuilder {
     /// `impossible-condition` rule.
     pub fn add_dead_branch(&mut self, branch: DeadBranch) {
         self.dead_branches.push(branch);
+    }
+
+    /// Registers a switch-ON setter with its activation gate (for the
+    /// `circular-gate` rule). Ignores the placeholder switch id 0.
+    pub fn add_switch_gate(&mut self, gate: SwitchGate) {
+        if gate.switch_id != 0 {
+            self.switch_gates.push(gate);
+        }
+    }
+
+    /// Marks a switch as written by an opaque source (event script / plugin
+    /// command) with an unknown value: `circular-gate` treats it as freely
+    /// settable. Ignores the placeholder switch id 0.
+    pub fn mark_switch_script_written(&mut self, id: u32) {
+        if id != 0 {
+            self.script_written_switches.insert(id);
+        }
     }
 
     /// Marks a common event as reserved by a script/plugin
@@ -360,6 +407,8 @@ impl IrBuilder {
             dead_branches: self.dead_branches,
             reserved_common_events: self.reserved_common_events,
             common_event_summaries,
+            switch_gates: self.switch_gates,
+            script_written_switches: self.script_written_switches,
         }
     }
 }

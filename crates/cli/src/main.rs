@@ -44,6 +44,7 @@ struct Effective {
     disable: Vec<String>,
     orphans: bool,
     dead_common_events: bool,
+    circular_gates: bool,
     min_severity: Option<Severity>,
     fail_on: Option<FailOn>,
     suppressed: HashSet<String>,
@@ -110,6 +111,7 @@ fn main() -> ExitCode {
     let registry = build_registry(&eff);
     let orphans_active = registry.rule_ids().any(|id| id == "orphan-assets");
     let dead_ce_active = registry.rule_ids().any(|id| id == "dead-common-event");
+    let circular_gates_active = registry.rule_ids().any(|id| id == "circular-gate");
 
     let ctx = RuleCtx::with_codes(
         &ir,
@@ -183,6 +185,9 @@ fn main() -> ExitCode {
             if !dead_ce_active {
                 render::console::print_dead_common_events_hint(lang);
             }
+            if !circular_gates_active {
+                render::console::print_circular_gates_hint(lang);
+            }
             if suppressed_count > 0 {
                 eprintln!(
                     "{}",
@@ -250,6 +255,7 @@ fn resolve_effective(args: &Args, cfg: &FileConfig) -> Result<Effective, String>
         disable: take(&args.disable, &cfg.disable),
         orphans: args.orphans || cfg.orphans,
         dead_common_events: args.dead_common_events || cfg.dead_common_events,
+        circular_gates: args.circular_gates || cfg.circular_gates,
         min_severity,
         fail_on,
         suppressed: cfg.suppressed_fingerprints(),
@@ -286,6 +292,8 @@ fn build_registry(eff: &Effective) -> Registry {
             eff.orphans || eff.enable.iter().any(|e| e == id)
         } else if id == "dead-common-event" {
             eff.dead_common_events || eff.enable.iter().any(|e| e == id)
+        } else if id == "circular-gate" {
+            eff.circular_gates || eff.enable.iter().any(|e| e == id)
         } else if eff.enable.is_empty() {
             true
         } else {
@@ -322,6 +330,7 @@ fn builtin_rules() -> Vec<Box<dyn dk_doctor_core::Rule>> {
         Box::new(rules::unknown_plugin_command::UnknownPluginCommand),
         Box::new(rules::plugin_conflict::PluginConflict),
         Box::new(rules::vehicle_start_map::VehicleStartMap),
+        Box::new(rules::circular_gate::CircularGate),
     ]
 }
 
@@ -358,10 +367,21 @@ mod tests {
         // Noisy info rules are off by default.
         assert!(!active.iter().any(|id| id == "orphan-assets"));
         assert!(!active.iter().any(|id| id == "dead-common-event"));
+        // The progression-deadlock prototype is off by default too.
+        assert!(!active.iter().any(|id| id == "circular-gate"));
         // Regular rules stay enabled.
         assert!(active.iter().any(|id| id == "referential-integrity"));
         assert!(active.iter().any(|id| id == "cyclic-common-events"));
         assert!(active.iter().any(|id| id == "dead-self-switch"));
+    }
+
+    #[test]
+    fn circular_gates_flag_enables_the_rule() {
+        let active = ids(&[".", "--circular-gates"]);
+        assert!(active.iter().any(|id| id == "circular-gate"));
+        // Other opt-in rules are not turned on as a side effect.
+        assert!(!active.iter().any(|id| id == "orphan-assets"));
+        assert!(!active.iter().any(|id| id == "dead-common-event"));
     }
 
     #[test]

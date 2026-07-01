@@ -40,6 +40,8 @@ pub struct AnalyzeOpts {
     pub orphans: bool,
     /// Enable the opt-in `dead-common-event`.
     pub dead_common_events: bool,
+    /// Enable the opt-in `circular-gate` (progression-deadlock prototype).
+    pub circular_gates: bool,
     /// Minimum severity: `"info"` | `"warning"` | `"error"` (otherwise no filter).
     pub min_severity: Option<String>,
 }
@@ -286,6 +288,8 @@ fn build_registry(opts: &AnalyzeOpts) -> Registry {
             opts.orphans || opts.enable.iter().any(|e| e == id)
         } else if id == "dead-common-event" {
             opts.dead_common_events || opts.enable.iter().any(|e| e == id)
+        } else if id == "circular-gate" {
+            opts.circular_gates || opts.enable.iter().any(|e| e == id)
         } else if opts.enable.is_empty() {
             true
         } else {
@@ -322,6 +326,7 @@ fn builtin_rules() -> Vec<Box<dyn dk_doctor_core::Rule>> {
         Box::new(rules::unknown_plugin_command::UnknownPluginCommand),
         Box::new(rules::plugin_conflict::PluginConflict),
         Box::new(rules::vehicle_start_map::VehicleStartMap),
+        Box::new(rules::circular_gate::CircularGate),
     ]
 }
 

@@ -54,6 +54,14 @@ pub struct Args {
     #[arg(long = "dead-common-events")]
     pub dead_common_events: bool,
 
+    /// Enable the `circular-gate` rule (off by default, prototype): finds
+    /// progression deadlocks — clusters of global switches that mutually gate each
+    /// other, so none can ever be turned on. Switches turned on by a plugin
+    /// command are not tracked, so on plugin-heavy projects a "deadlock" may be a
+    /// false positive.
+    #[arg(long = "circular-gates")]
+    pub circular_gates: bool,
+
     /// Path to the project config (`.dk-doctor.toml`). Defaults to
     /// `<project>/.dk-doctor.toml`; if absent, built-in defaults are used.
     #[arg(long, value_name = "PATH")]

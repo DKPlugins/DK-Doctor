@@ -9,6 +9,7 @@ use crate::ir::Ir;
 
 pub mod broken_assets;
 pub mod broken_transfer;
+pub mod circular_gate;
 pub mod cyclic_common_events;
 pub mod dead_code_after_exit;
 pub mod dead_common_event;
@@ -162,6 +163,7 @@ impl Registry {
                 Box::new(unknown_plugin_command::UnknownPluginCommand),
                 Box::new(plugin_conflict::PluginConflict),
                 Box::new(vehicle_start_map::VehicleStartMap),
+                Box::new(circular_gate::CircularGate),
             ],
         }
     }

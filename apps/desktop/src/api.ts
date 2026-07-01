@@ -30,6 +30,8 @@ export interface Finding {
   severity: Severity;
   category: Category;
   confidence: Confidence;
+  /** Stable, language-neutral finding identity (rule + file + path + args). */
+  fingerprint: string;
   file: string;
   path: string;
   message_key: string;
