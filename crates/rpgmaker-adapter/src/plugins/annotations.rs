@@ -10,6 +10,11 @@
 //!
 //! Parameter values come from `plugins.js` (here only the schema: what `@type`
 //! a parameter has); their combination happens in [`super::collect`].
+//!
+//! When a parameter has **no** `@type` (the common case on MV, where the editor
+//! never wrote one), [`infer_symbol_from_name`] recovers switch/variable/common-
+//! event references from the parameter *name* suffix (`…Switch`/`…Variable`/
+//! `…Common Event`). This is agnostic and suffix-only — see [`InferredKind`].
 
 use dk_doctor_core::ir::DbKind;
 
@@ -30,6 +35,80 @@ pub enum ParamType {
     Other,
 }
 
+/// A switch/variable/common-event kind inferred from a parameter *name* alone.
+///
+/// Used only when a parameter carries **no explicit `@type`** (on MV `@type` is
+/// absent, so the typed Tier A path is blind). Agnostic and suffix-only: the
+/// value is then treated as a symbol/record id exactly as the corresponding
+/// `@type` would treat it. Validated against the YEP/MV/MZ corpus (finding: 48
+/// suffix params, 0 boolean-prefix collisions).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum InferredKind {
+    /// The value is switch id(s) (name ends with `…Switch`/`…Switches`).
+    Switch,
+    /// The value is variable id(s) (name ends with `…Variable`/`…Variables`).
+    Variable,
+    /// The value is common-event id(s) (name ends with `…Common Event`).
+    CommonEvent,
+}
+
+/// The base words that name a symbol/record kind (used by both the id-strip guard
+/// and the final suffix match, so `"Common Event ID"` strips like `"Switch ID"`).
+fn ends_with_symbol_word(base: &str) -> bool {
+    base.ends_with("switch")
+        || base.ends_with("switches")
+        || base.ends_with("variable")
+        || base.ends_with("variables")
+        || base.ends_with("common event")
+        || base.ends_with("common events")
+        || base.ends_with("commonevent")
+        || base.ends_with("commonevents")
+}
+
+/// Strips a decorative trailing `id`/`ids` token so the base word ends the string
+/// (`"Dawn Switch ID"` → `"dawn switch"`, `"switchId"` → `"switch"`,
+/// `"Common Event ID"` → `"common event"`). The strip is accepted only when it
+/// exposes a symbol word — otherwise ordinary words like `"grid"` must not be
+/// mutilated.
+fn strip_id_suffix(s: &str) -> &str {
+    for tail in [" ids", " id", "ids", "id"] {
+        if let Some(base) = s.strip_suffix(tail) {
+            let base = base.trim_end();
+            if ends_with_symbol_word(base) {
+                return base;
+            }
+        }
+    }
+    s
+}
+
+/// Infers a switch/variable/common-event kind from an **untyped** parameter name
+/// by its trailing token. Returns `None` when no suffix matches.
+///
+/// Whole-token by construction: `str::ends_with` already rejects `"Switcher"`
+/// (ends with `switcher`, not `switch`) and `"SwitchActorText"` (the token is a
+/// prefix, not the tail), the two false-positive traps seen in the corpus.
+/// Common-event is checked first — its suffixes are disjoint from the others.
+pub fn infer_symbol_from_name(name: &str) -> Option<InferredKind> {
+    let lower = name.trim().to_ascii_lowercase();
+    let base = strip_id_suffix(&lower);
+    let ends_any = |suffixes: &[&str]| suffixes.iter().any(|s| base.ends_with(s));
+    if ends_any(&[
+        "common event",
+        "common events",
+        "commonevent",
+        "commonevents",
+    ]) {
+        Some(InferredKind::CommonEvent)
+    } else if ends_any(&["switch", "switches"]) {
+        Some(InferredKind::Switch)
+    } else if ends_any(&["variable", "variables"]) {
+        Some(InferredKind::Variable)
+    } else {
+        None
+    }
+}
+
 /// Schema of a single `@param`.
 #[derive(Clone, Debug)]
 pub struct ParamSchema {
@@ -37,6 +116,11 @@ pub struct ParamSchema {
     pub name: String,
     /// Parameter type (`@type`).
     pub ty: ParamType,
+    /// Whether an explicit `@type` tag was present (even an unrecognized one like
+    /// `boolean`/`string`/`struct`). Guards name-alias inference: an explicit type
+    /// always wins over the name, so `@type boolean` on a `…Switch` param is never
+    /// re-interpreted as a switch id.
+    pub has_explicit_type: bool,
     /// Whether it is an array (`@type X[]`).
     pub is_array: bool,
     /// `@dir` — directory for `@type file` (relative to the project root).
@@ -166,6 +250,7 @@ pub fn parse(src: &str) -> PluginAnnotations {
                     cur_param = Some(ParamSchema {
                         name: rest.to_string(),
                         ty: ParamType::Other,
+                        has_explicit_type: false,
                         is_array: false,
                         dir: None,
                     });
@@ -176,6 +261,7 @@ pub fn parse(src: &str) -> PluginAnnotations {
                     let (ty, is_array) = ParamType::from_type_value(rest);
                     p.ty = ty;
                     p.is_array = is_array;
+                    p.has_explicit_type = true;
                 }
             }
             "@dir" => {
@@ -339,6 +425,69 @@ mod tests {
         let a = parse(src);
         assert_eq!(a.params.len(), 1);
         assert_eq!(a.params[0].ty, ParamType::Switch);
+    }
+
+    #[test]
+    fn records_explicit_type_flag() {
+        // A param with @type (even an unrecognized one) is flagged; a bare @param is not.
+        let src = r#"/*:
+ * @param BattleSwitch
+ * @type boolean
+ * @param CarriedVariable
+ */"#;
+        let a = parse(src);
+        let by_name = |n: &str| a.params.iter().find(|p| p.name == n).unwrap();
+        assert!(by_name("BattleSwitch").has_explicit_type);
+        assert_eq!(by_name("BattleSwitch").ty, ParamType::Other); // boolean → Other
+        assert!(!by_name("CarriedVariable").has_explicit_type);
+    }
+
+    #[test]
+    fn infers_switch_variable_common_event_by_suffix() {
+        use InferredKind::*;
+        // Positive: whole-token suffixes across spacing/camelCase/plural/ID forms.
+        for (name, want) in [
+            ("Battle Switch", Switch),
+            ("Non-Local Switch", Switch),
+            ("cheaterSwitch", Switch),
+            ("OnSwitches", Switch),
+            ("Dawn Switch ID", Switch),
+            ("Day Week Switches IDs", Switch),
+            ("mainSwitchId", Switch),
+            ("Carried Variable", Variable),
+            ("Latest Button Variable", Variable),
+            ("variableId", Variable),
+            ("Hour Variable ID", Variable),
+            ("Alert Common Event", CommonEvent),
+            ("CommonEvent", CommonEvent),
+            ("On Language Change Common Event", CommonEvent),
+            ("Alert Common Event ID", CommonEvent),
+            ("CommonEventID", CommonEvent),
+            ("Start Common Events IDs", CommonEvent),
+        ] {
+            assert_eq!(
+                infer_symbol_from_name(name),
+                Some(want),
+                "{name} should infer {want:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn does_not_infer_from_non_suffix_names() {
+        // "Switcher"/"SwitchActorText" traps, a real word ending in "id",
+        // and plain unrelated names must NOT match.
+        for name in [
+            "Message Switcher",
+            "SwitchActorText",
+            "Grid",
+            "Show Percents",
+            "Window Width",
+            "Enable", // no suffix at all
+            "",
+        ] {
+            assert_eq!(infer_symbol_from_name(name), None, "{name} must not infer");
+        }
     }
 
     #[test]

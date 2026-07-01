@@ -10,12 +10,17 @@
 //!  - `@type <db>` (`common_event`/`state`/`actor`/… + `[]`) → DB record ids →
 //!    `Edge::ReferencesDbId` on a lazy [`Entity::Plugin`] (catches
 //!    `referential-integrity`; for `common_event` it also rescues `dead-common-event`);
+//!  - **untyped** params (no `@type`, common on MV) → name-alias inference
+//!    ([`annotations::infer_symbol_from_name`]): a `…Switch`/`…Variable` name →
+//!    `mark_*_declared_by_plugin`, a `…Common Event` name → `add_reserved_common_event`
+//!    (rescues `dead-common-event`). Suppression only — no finding is emitted, so a
+//!    misfire costs at most a missed diagnostic, never a false alarm;
 //!  - `@command` → command registry; `@base`/`@orderAfter`/`@orderBefore` →
 //!    order declarations — both go into [`PluginMeta`].
 //!
 //! A file that cannot be read/parsed is skipped with a warning.
 
-use crate::plugins::annotations::{self, ParamType};
+use crate::plugins::annotations::{self, InferredKind, ParamType};
 use crate::plugins::js;
 use crate::raw::plugins::PluginEntry;
 use camino::Utf8Path;
@@ -224,7 +229,34 @@ pub fn collect(
                         }
                     }
                 }
-                ParamType::Other => {}
+                ParamType::Other => {
+                    // No recognized `@type`. On MV the editor never writes one, so
+                    // fall back to name-alias inference (suffix-only): a `…Switch`/
+                    // `…Variable`/`…Common Event` parameter names a symbol/CE id.
+                    // Skipped when an explicit (but unrecognized) `@type` is present
+                    // — `@type boolean` on a `…Switch` param is a toggle, not an id.
+                    //
+                    // Inference only ever SUPPRESSES a false positive (marks the
+                    // symbol/CE as plugin-managed); it emits no finding, so a wrong
+                    // guess costs a missed diagnostic, never a false alarm. Ids are
+                    // decoded list-tolerantly (scalar, JSON array, or comma/space
+                    // list as seen in MV plugins).
+                    if !param.has_explicit_type
+                        && let Some(kind) = annotations::infer_symbol_from_name(&param.name)
+                    {
+                        for id in decode_ids(value, true) {
+                            match kind {
+                                InferredKind::Switch => {
+                                    b.symbols_mut().mark_switch_declared_by_plugin(id);
+                                }
+                                InferredKind::Variable => {
+                                    b.symbols_mut().mark_variable_declared_by_plugin(id);
+                                }
+                                InferredKind::CommonEvent => b.add_reserved_common_event(id),
+                            }
+                        }
+                    }
+                }
             }
         }
 
@@ -476,6 +508,83 @@ mod tests {
                 .filter(|n| matches!(n.kind, Entity::Plugin(_)))
                 .count(),
             1
+        );
+
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    fn collect_infers_untyped_suffix_params() {
+        // MV-style plugin: params carry NO @type. Name-alias inference must treat
+        // `…Switch`/`…Variable` as declared symbols and `…Common Event` as reserved.
+        let tmp = std::env::temp_dir().join(format!("dkplugininfer{}", std::process::id()));
+        let _ = std::fs::create_dir_all(&tmp);
+        let src = r#"/*:
+ * @param Battle Switch
+ * @param Day Switches IDs
+ * @param Managed Switches
+ * @param Zero Switch
+ * @param Carried Variable
+ * @param Alert Common Event
+ * @param Draw Switches
+ * @type boolean
+ * @param Message Switcher
+ */"#;
+        std::fs::write(tmp.join("Infer.js"), src).unwrap();
+
+        let entry = PluginEntry {
+            name: "Infer".to_string(),
+            status: true,
+            description: String::new(),
+            parameters: params(&[
+                ("Battle Switch", "7"),
+                ("Day Switches IDs", "29,30"), // comma-separated MV id list
+                ("Managed Switches", r#"["21","22"]"#), // JSON string-array
+                ("Zero Switch", "0"),          // 0 = "none" → nothing marked
+                ("Carried Variable", "3"),
+                ("Alert Common Event", "5"),
+                ("Draw Switches", "9"), // @type boolean → explicit type wins, no inference
+                ("Message Switcher", "11"), // "Switcher" != token "Switch" → no match
+            ]),
+        };
+
+        let mut b = Ir::builder(Engine::Mz);
+        let mut warns = Vec::new();
+        let dir = camino::Utf8PathBuf::from_path_buf(tmp.clone()).unwrap();
+        let pjs = camino::Utf8Path::new("js/plugins.js");
+        collect(&mut b, &[entry], &dir, pjs, &mut warns);
+        let ir = b.finish();
+
+        // Switch / variable → declared by plugin (suppresses uninitialized).
+        // Covers scalar (7), comma list (29,30) and JSON array (21,22) decoding.
+        assert!(ir.symbols.switches.get(&7).unwrap().declared_by_plugin);
+        assert!(ir.symbols.switches.get(&29).unwrap().declared_by_plugin);
+        assert!(ir.symbols.switches.get(&30).unwrap().declared_by_plugin);
+        assert!(ir.symbols.switches.get(&21).unwrap().declared_by_plugin);
+        assert!(ir.symbols.switches.get(&22).unwrap().declared_by_plugin);
+        assert!(ir.symbols.variables.get(&3).unwrap().declared_by_plugin);
+        // Value 0 = "none" → no entry created.
+        assert!(
+            !ir.symbols.switches.contains_key(&0),
+            "0 = none, не помечается"
+        );
+        // Common event → reserved (rescues dead-common-event).
+        assert!(ir.reserved_common_events.contains(&5));
+        // Negative controls: explicit @type boolean and "Switcher" are NOT inferred.
+        assert!(
+            !ir.symbols.switches.contains_key(&9),
+            "@type boolean не выводится"
+        );
+        assert!(
+            !ir.symbols.switches.contains_key(&11) && !ir.symbols.variables.contains_key(&11),
+            "'Switcher' — не суффикс 'Switch'"
+        );
+        // Inference emits no DB-ref edges (pure suppression, no findings).
+        assert!(
+            !ir.edges
+                .iter()
+                .any(|r| matches!(r.edge, Edge::ReferencesDbId { .. })),
+            "инференция не эмитит referential-integrity"
         );
 
         let _ = std::fs::remove_dir_all(&tmp);
