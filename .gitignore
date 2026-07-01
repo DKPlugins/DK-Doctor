@@ -3,8 +3,6 @@
 **/*.rs.bk
 *.pdb
 
-# Cargo.lock: коммитим (это приложение/CLI, не библиотека) — НЕ игнорируем
-
 # IDE
 .idea/
 .vscode/
@@ -38,13 +36,13 @@ Desktop.ini
 # of the codebase; the canonical banner copy lives in the site repo. Local-only.
 /marketing/
 
-# Desktop app (apps/desktop) — артефакты сборки
-# Backstop: tsc должен работать с noEmit, но если кто-то снова сгенерит .js рядом с .ts — не коммитим
 apps/desktop/src/*.js
 /apps/desktop/node_modules/
 /apps/desktop/dist/
 /apps/desktop/src-tauri/target/
 /apps/desktop/src-tauri/gen/
 /apps/desktop/app-icon.png
-# Коммитим: apps/desktop/pnpm-lock.yaml и apps/desktop/src-tauri/Cargo.lock (это приложение)
+
 .code-graph/
+
+/plans/
