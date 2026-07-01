@@ -572,7 +572,10 @@ fn encryption_key(data_dir: &Utf8Path) -> Option<Vec<u8>> {
     let text = std::fs::read_to_string(data_dir.join("System.json").as_std_path()).ok()?;
     let sys: Sys = serde_json::from_str(&text).ok()?;
     let s = sys.encryption_key.trim();
-    if s.is_empty() || !s.len().is_multiple_of(2) {
+    // A real key is even-length ASCII hex. The `is_ascii` guard also keeps the
+    // byte-offset slicing below on char boundaries — a garbled multibyte key
+    // would otherwise panic (the loader must tolerate junk, not crash).
+    if s.is_empty() || !s.is_ascii() || !s.len().is_multiple_of(2) {
         return None;
     }
     (0..s.len())

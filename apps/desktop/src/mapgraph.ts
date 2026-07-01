@@ -61,6 +61,12 @@ function esc(s: string): string {
     .replace(/'/g, "&#39;");
 }
 
+/** Truncates by code point (not UTF-16 unit) so surrogate pairs stay intact. */
+function clip(label: string, max: number): string {
+  const chars = Array.from(label);
+  return chars.length > max ? chars.slice(0, max - 1).join("") + "…" : label;
+}
+
 /** Builds adjacency, BFS depths from the start map, and the missing-target set. */
 function derive(graph: MapGraph): Derived {
   const nodeIds = new Set(graph.nodes.map((n) => n.id));
@@ -228,27 +234,24 @@ export function renderMapGraph(graph: MapGraph, opts: GraphRenderOpts): string {
         : node?.name
           ? node.name
           : `Map ${id}`;
-      const title = isMissing
-        ? opts.brokenTitle
-        : band.kind === "island"
-          ? opts.islandTitle
-          : label;
+      const dynNote = node && node.dynamicExits > 0 ? ` (+${node.dynamicExits} dynamic)` : "";
+      const title =
+        (isMissing ? opts.brokenTitle : band.kind === "island" ? opts.islandTitle : label) + dynNote;
       const cls =
         "gnode" +
         (opts.selected === id ? " is-active" : "") +
         (isStart ? " gnode--start" : "") +
         (isMissing ? " gnode--missing" : "");
-      const dyn = node && node.dynamicExits > 0 ? `<title>+${node.dynamicExits} dynamic</title>` : "";
       const sel = isMissing ? "" : ` data-mapsel="${id}"`;
       nodeSvg +=
         `<g class="${cls}"${sel} tabindex="0">` +
-        `<title>${esc(title)}</title>${dyn}` +
+        `<title>${esc(title)}</title>` +
         `<rect x="${p.x}" y="${p.y}" width="${BOX_W}" height="${BOX_H}" rx="8" ` +
         `fill="${fill}" stroke="${stroke}"/>` +
         (isStart ? `<circle cx="${p.x + 12}" cy="${p.y + BOX_H / 2}" r="4" fill="var(--brand)"/>` : "") +
         `<text x="${p.x + (isStart ? 24 : BOX_W / 2)}" y="${p.y + BOX_H / 2 + 4}" ` +
         `text-anchor="${isStart ? "start" : "middle"}" class="glabel">` +
-        `<tspan class="gid">${id}</tspan> ${esc(label.length > 14 ? label.slice(0, 13) + "…" : label)}</text>` +
+        `<tspan class="gid">${id}</tspan> ${esc(clip(label, 14))}</text>` +
         "</g>";
     }
   }

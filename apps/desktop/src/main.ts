@@ -134,6 +134,8 @@ let graphLoading = false;
 let watchUnlisten: (() => void) | null = null;
 /** Debounce timer coalescing rapid watch-triggered re-scans. */
 let watchTimer: number | undefined;
+/** Monotonic token invalidating a startWatch that lost a race with stopWatch. */
+let watchToken = 0;
 
 // --- Theme/language resolution ---------------------------------------------
 const resolveTheme = (s: Settings): "light" | "dark" =>
@@ -695,6 +697,7 @@ async function startScan(path: string): Promise<void> {
     state.newOnly = false;
     state.atlas = undefined;
     state.graph = undefined;
+    graphLoading = false; // a stale in-flight fetch must not block the new project's graph
     state.atlasSel = null;
     state.atlasEvent = null;
     state.atlasNewOnly = false;
@@ -900,14 +903,24 @@ function exportAs(kind: string): void {
 }
 
 // --- Watch Mode ------------------------------------------------------------
-/** Begins watching the open project for changes (replacing any prior watcher). */
+/**
+ * Begins watching the open project for changes (replacing any prior watcher).
+ *
+ * `startWatch`/`stopWatch` overlap: the async `listen`/`watchProject` round-trips
+ * can interleave with a toggle-off or a project switch. A monotonic token guards
+ * against that — if it advances during an await, the just-established listener is
+ * torn down instead of silently re-arming a watcher the user disabled.
+ */
 async function startWatch(): Promise<void> {
   if (!state.project) return;
   stopWatch();
   const path = state.project.path;
+  const token = ++watchToken;
   try {
-    watchUnlisten = await onProjectChanged((changedPath) => {
-      if (busy || state.view !== "report") return;
+    const unlisten = await onProjectChanged((changedPath) => {
+      // Guard on the live preference too: a stale listener must never re-scan
+      // after Watch Mode was turned off.
+      if (!state.settings.watch || busy || state.view !== "report") return;
       if (!state.project || state.project.path !== changedPath) return;
       // Coalesce a burst of file writes into one re-scan.
       if (watchTimer) clearTimeout(watchTimer);
@@ -915,7 +928,14 @@ async function startWatch(): Promise<void> {
         if (!busy && state.project?.path === changedPath) void startScan(changedPath);
       }, 400);
     });
+    if (token !== watchToken) {
+      unlisten();
+      return;
+    }
+    watchUnlisten = unlisten;
     await watchProject(path);
+    // A toggle-off / re-arm that happened while awaiting invalidates us.
+    if (token !== watchToken) stopWatch();
   } catch {
     /* watch unavailable (outside Tauri / permission) — the toggle is a no-op */
   }
@@ -923,6 +943,7 @@ async function startWatch(): Promise<void> {
 
 /** Stops watching and clears the pending debounce (idempotent). */
 function stopWatch(): void {
+  watchToken++; // invalidate any startWatch still awaiting its listen/watch calls
   if (watchTimer) {
     clearTimeout(watchTimer);
     watchTimer = undefined;
