@@ -16,6 +16,7 @@ mod interpreter;
 mod plugins;
 mod profiles;
 mod raw;
+mod spatial;
 
 use camino::Utf8Path;
 use dk_doctor_core::ir::Ir;

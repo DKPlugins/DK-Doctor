@@ -237,6 +237,11 @@ pub struct Tileset {
     /// tilesetNames[9] (slots A1..E; ""=unused) → img/tilesets/.
     #[serde(default, rename = "tilesetNames")]
     pub tileset_names: Vec<String>,
+    /// Per-tile passage flags (indexed by tile id, length up to 0x2000). Bits 0..3
+    /// are the four impassable directions (0x0f = impassable), 0x10 = star
+    /// (passable, drawn above). Used by the spatial (passability) analysis.
+    #[serde(default)]
+    pub flags: Vec<u32>,
 }
 
 /// Animations.json — MV-style (`frames`) or MZ-Effekseer (`effectName`).

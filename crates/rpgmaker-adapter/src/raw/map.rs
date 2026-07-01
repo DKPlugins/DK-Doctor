@@ -23,6 +23,17 @@ pub struct Map {
     /// Tileset id (img/tilesets/ indirectly).
     #[serde(default, rename = "tilesetId")]
     pub tileset_id: u32,
+    /// Map width in tiles.
+    #[serde(default)]
+    pub width: u32,
+    /// Map height in tiles.
+    #[serde(default)]
+    pub height: u32,
+    /// Flat layered tile-id array (length = width*height*6). Layers z=0..3 are the
+    /// tile layers used for passability; z=4 shadow, z=5 region. Empty on maps
+    /// without saved tiles. Needed by the spatial (passability) analysis.
+    #[serde(default)]
+    pub data: Vec<i32>,
     /// battleback1Name (img/battlebacks1/).
     #[serde(default, rename = "battleback1Name")]
     pub battleback1_name: String,

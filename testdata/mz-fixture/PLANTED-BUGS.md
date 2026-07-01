@@ -47,6 +47,11 @@ Enemy #1, Animation #1, Tileset #1, Actor #1. Ids `#99` absent everywhere.
 | `dead-common-event` | `CommonEvents.json` / CE **#2 "Orphan"** + the cluster **#3/#4** | #2: trigger None, no caller. #3/#4: they call only each other and no live caller ever enters the cluster → transitive reachability marks all three dead (3 findings; CLI: opt-in via `--dead-common-events`) |
 | `cyclic-common-events` | `CommonEvents.json` / CE **#3 ↔ #4** | mutual `117` calls form a cycle (canonical `[3,4]`) — also flagged as dead, since nothing triggers the cluster |
 | `unknown-plugin-command` | `CommonEvents.json` / CE **#1 "Init"** — `357` call `("DummyPlugin","doNothing")` | DummyPlugin is not in `plugins.js`, so the pair isn't in any `@command` registry (structured 357) |
+| `picture-lifecycle` | `Map003` / EV003 "PicOrder" / page1 / cmd0 — `232` Move Picture **#1** precedes the `231` Show Picture **#1** in the same list | the move targets a not-yet-shown picture (no-op / wrong order); guarded against loop/cross-branch idioms (CLI: opt-in via `--pictures`, pictures can persist across events) |
+| `empty-event-page` | `Map003` / EV002 "EmptyLoop" / page1 — unconditional Autorun (`trigger:3`) with an empty list (only the `0` terminator) | an empty ungated Autorun blocks input forever (freeze); does not overlap `stuck-autorun`, which handles *gated* autorun |
+| `db-reachability` | `Armors.json` Armor **#1** | referenced nowhere (not equipped / sold / dropped / event-granted); Weapon/Skill/Enemy #1 are controls (CLI: opt-in via `--db-reachability`) |
+
+`blocked-tile` (PR-9, spatial) is **not** planted here — it needs a coherent tile grid + tileset passage flags; it is covered end-to-end by an adapter test (`blocked_tile_player_start_end_to_end`) plus the `spatial` unit tests. CLI: opt-in via `--tiles`.
 
 ### `referential-integrity` breakdown (5 findings)
 
@@ -96,14 +101,20 @@ Enemy #1, Animation #1, Tileset #1, Actor #1. Ids `#99` absent everywhere.
 
 ## Expected verdict
 
-Running all built-in rules (`Registry::with_builtin().run_all`, incl. `orphan-assets`):
-**11 errors, 11 warnings, 5 infos**. Process exit code `2` (errors present).
+Running all built-in rules (`Registry::with_builtin().run_all`, incl. `orphan-assets`
+and `db-reachability`): **11 errors, 13 warnings, 6 infos**. Process exit code `2`
+(errors present).
 
 - errors (11): `referential-integrity` ×5 + `broken-transfer` + `broken-assets` ×3
   (GhostPic + MissingArena + Outside_B) + `missing-base` + `plugin-load-order`.
-- warnings (11): `uninitialized-symbols` + `dead-variables` + `dead-code-after-exit` ×2 +
+- warnings (13): `uninitialized-symbols` + `dead-variables` + `dead-code-after-exit` ×2 +
   `dead-self-switch` + `unreachable-self-switch` + `cyclic-common-events` + `shadowed-page` +
-  `stuck-autorun` + `unknown-plugin-command` + `impossible-condition`.
-- infos (5): `unreachable-maps` + `orphan-assets` + `dead-common-event` ×3 (CE #2 + cluster #3/#4).
+  `stuck-autorun` + `unknown-plugin-command` + `impossible-condition` + `picture-lifecycle` +
+  `empty-event-page`.
+- infos (6): `unreachable-maps` + `orphan-assets` + `dead-common-event` ×3 (CE #2 + cluster #3/#4)
+  + `db-reachability` (Armor #1).
 
-CLI default (`--orphans` off) hides the single `orphan-assets` info → 11 errors / 11 warnings / 4 infos.
+CLI default hides every opt-in rule — `orphan-assets`, `dead-common-event` (×3),
+`db-reachability`, `picture-lifecycle`, `blocked-tile`, `circular-gate` — leaving
+**11 errors / 12 warnings / 1 info** (`empty-event-page` is the one new default-on
+rule; the lone info is `unreachable-maps`).

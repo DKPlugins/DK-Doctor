@@ -12,11 +12,12 @@ pub mod rules;
 
 pub use finding::{Category, Confidence, Finding, Severity};
 pub use ir::{
-    AssetKey, AssetKind, AssetRef, CeTrigger, CmpOp, CommandMeta, CommonEvent, CommonEventSummary,
-    DatabaseRecord, DbKind, DeadBranch, Edge, EdgeRecord, Engine, Entity, EntityId, EntityNode,
-    Event, Ir, IrBuilder, Location, LocationPath, Map, MethodPatch, Page, PageConditions, PathSeg,
-    PluginCommand, PluginCommandCall, PluginMeta, PluginOrderDeps, ScriptBlackbox, Site,
-    SwitchGate, SymbolInfo, SymbolTable, TransferDesignation, Troop, VehicleKind, VehicleStartMap,
+    AssetKey, AssetKind, AssetRef, BlockedTile, BlockedTileKind, CeTrigger, CmpOp, CommandMeta,
+    CommonEvent, CommonEventSummary, DatabaseRecord, DbKind, DeadBranch, Edge, EdgeRecord, Engine,
+    Entity, EntityId, EntityNode, Event, Ir, IrBuilder, Location, LocationPath, Map, MethodPatch,
+    Page, PageConditions, PathSeg, PictureMisuse, PictureOp, PluginCommand, PluginCommandCall,
+    PluginMeta, PluginOrderDeps, ScriptBlackbox, Site, SwitchGate, SymbolInfo, SymbolTable,
+    TransferDesignation, Troop, VehicleKind, VehicleStartMap,
 };
 pub use message::{
     Chrome, Lang, LoadErrorKind, Msg, PluginOrderTag, SymbolKind, render, render_chrome,
@@ -156,7 +157,7 @@ mod tests {
     fn registry_has_all_builtin_rules() {
         let reg = Registry::with_builtin();
         let ids: Vec<&str> = reg.rule_ids().collect();
-        assert_eq!(ids.len(), 21);
+        assert_eq!(ids.len(), 25);
         assert!(ids.contains(&"dead-variables"));
         assert!(ids.contains(&"uninitialized-symbols"));
         assert!(ids.contains(&"broken-transfer"));
@@ -178,6 +179,10 @@ mod tests {
         assert!(ids.contains(&"plugin-conflict"));
         assert!(ids.contains(&"vehicle-start-map"));
         assert!(ids.contains(&"circular-gate"));
+        assert!(ids.contains(&"picture-lifecycle"));
+        assert!(ids.contains(&"empty-event-page"));
+        assert!(ids.contains(&"blocked-tile"));
+        assert!(ids.contains(&"db-reachability"));
     }
 
     #[test]

@@ -79,6 +79,12 @@ fn message_key(msg: &Msg) -> &'static str {
         Msg::PluginConflict { .. } => "plugin_conflict",
         Msg::ImpossibleCondition { .. } => "impossible_condition",
         Msg::CircularGate { .. } => "circular_gate",
+        Msg::TransferToBlockedTile { .. } => "transfer_to_blocked_tile",
+        Msg::StartInWall { .. } => "start_in_wall",
+        Msg::PictureBeforeShow { .. } => "picture_before_show",
+        Msg::EmptyAutorunPage { .. } => "empty_autorun_page",
+        Msg::EmptyParallelPage { .. } => "empty_parallel_page",
+        Msg::UnusedDbRecord { .. } => "unused_db_record",
     }
 }
 

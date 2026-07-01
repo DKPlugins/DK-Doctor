@@ -62,6 +62,28 @@ pub struct Args {
     #[arg(long = "circular-gates")]
     pub circular_gates: bool,
 
+    /// Enable the `blocked-tile` rule (off by default): checks tile passability of
+    /// fixed destinations — a Transfer Player or the player's start landing on a
+    /// tile impassable from all four directions. Passability plugins (region
+    /// passage, pixel movement) are not accounted for, so a "blocked" tile may be
+    /// a false positive.
+    #[arg(long = "tiles")]
+    pub tiles: bool,
+
+    /// Enable the `db-reachability` rule (off by default): finds database records
+    /// (enemies/skills/weapons/armors) referenced nowhere in the data. Plugin and
+    /// notetag references are not tracked, so an "unused" record may be a false
+    /// positive.
+    #[arg(long = "db-reachability")]
+    pub db_reachability: bool,
+
+    /// Enable the `picture-lifecycle` rule (off by default): flags a picture
+    /// operated on (Move/Rotate/Tint/Erase) before it is Shown in the same command
+    /// list. Pictures persist across events, so a picture shown by another
+    /// event/script cannot be seen statically → an op may be a false positive.
+    #[arg(long = "pictures")]
+    pub pictures: bool,
+
     /// Path to the project config (`.dk-doctor.toml`). Defaults to
     /// `<project>/.dk-doctor.toml`; if absent, built-in defaults are used.
     #[arg(long, value_name = "PATH")]

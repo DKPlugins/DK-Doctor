@@ -9,7 +9,7 @@
 //! The catalog uses an **exhaustive** `match` over [`Lang`] and [`Msg`] — with
 //! no `_ =>` fallback, so a missing translation is caught by the compiler.
 
-use crate::ir::{CmpOp, DbKind, VehicleKind};
+use crate::ir::{CmpOp, DbKind, PictureOp, VehicleKind};
 
 /// Report output language.
 #[derive(Copy, Clone, Debug, PartialEq, Eq, serde::Serialize)]
@@ -238,6 +238,61 @@ pub enum Msg {
         /// another plugin's logic.
         overwriters: Vec<String>,
     },
+    /// A Transfer Player (201) whose fixed destination lands on a tile impassable
+    /// from all four directions — the player cannot move off it (soft-lock).
+    TransferToBlockedTile {
+        /// Target map id.
+        map_id: u32,
+        /// Destination tile x.
+        x: u32,
+        /// Destination tile y.
+        y: u32,
+    },
+    /// The player's start position (System.json) is on a tile impassable from all
+    /// four directions — the game starts frozen.
+    StartInWall {
+        /// Start map id.
+        map_id: u32,
+        /// Start tile x.
+        x: u32,
+        /// Start tile y.
+        y: u32,
+    },
+    /// A picture is operated on (Move/Rotate/Tint/Erase) before it is Shown on the
+    /// same command sequence — the operation targets a picture that does not exist
+    /// yet (no effect).
+    PictureBeforeShow {
+        /// Picture id (RPG Maker picture slot).
+        picture_id: u32,
+        /// The offending operation.
+        op: PictureOp,
+    },
+    /// An Autorun page with an empty command list — Autorun blocks input while
+    /// active, so an empty one freezes the game (soft-lock).
+    EmptyAutorunPage {
+        /// Page number (1-based).
+        page: u32,
+        /// Id of the event the page belongs to.
+        event: u32,
+    },
+    /// A Parallel page with an empty command list — it runs every frame but does
+    /// nothing (likely forgotten content).
+    EmptyParallelPage {
+        /// Page number (1-based).
+        page: u32,
+        /// Id of the event the page belongs to.
+        event: u32,
+    },
+    /// A database record that nothing references anywhere in the data — likely
+    /// unused / unreachable content.
+    UnusedDbRecord {
+        /// Kind of the DB record.
+        kind: DbKind,
+        /// Record id.
+        id: u32,
+        /// Record name, if set.
+        name: Option<String>,
+    },
 }
 
 /// Source of the load-order requirement (for [`Msg::PluginLoadOrder`]).
@@ -286,6 +341,12 @@ pub enum Chrome {
     DeadCommonEventsHint,
     /// Hint about `--circular-gates`.
     CircularGatesHint,
+    /// Hint about `--tiles`.
+    TilesHint,
+    /// Hint about `--db-reachability`.
+    DbReachabilityHint,
+    /// Hint about `--pictures`.
+    PicturesHint,
     /// Note: N findings were suppressed by the project config (`.dk-doctor.toml`).
     SuppressedNote {
         /// Number of findings hidden by `[[suppress]]` entries.
@@ -396,6 +457,24 @@ fn vehicle_label(v: VehicleKind, lang: Lang) -> &'static str {
             VehicleKind::Boat => "boat",
             VehicleKind::Ship => "ship",
             VehicleKind::Airship => "airship",
+        },
+    }
+}
+
+/// Picture-operation name in the chosen language (for [`Msg::PictureBeforeShow`]).
+fn picture_op_label(op: PictureOp, lang: Lang) -> &'static str {
+    match lang {
+        Lang::Ru => match op {
+            PictureOp::Move => "Переместить картинку",
+            PictureOp::Rotate => "Повернуть картинку",
+            PictureOp::Tint => "Тонировать картинку",
+            PictureOp::Erase => "Удалить картинку",
+        },
+        Lang::En => match op {
+            PictureOp::Move => "Move Picture",
+            PictureOp::Rotate => "Rotate Picture",
+            PictureOp::Tint => "Tint Picture",
+            PictureOp::Erase => "Erase Picture",
         },
     }
 }
@@ -716,6 +795,99 @@ fn render_ru(msg: &Msg) -> String {
                  Достоверность likely (AST-эвристика): проверьте совместимость и порядок загрузки."
             )
         }
+        Msg::TransferToBlockedTile { map_id, x, y } => {
+            format!(
+                "Переход (Transfer Player) на карту #{map_id} в клетку ({x}, {y}), непроходимую со \
+                 всех четырёх сторон (по флагам тайлсета) — игрок не сможет с неё сойти (soft-lock). \
+                 Достоверность likely: плагины проходимости (по регионам, пиксельное движение) и \
+                 события со сквозным проходом статикой не учитываются."
+            )
+        }
+        Msg::StartInWall { map_id, x, y } => {
+            format!(
+                "Стартовая позиция игрока (System.json) — карта #{map_id}, клетка ({x}, {y}), \
+                 непроходимая со всех четырёх сторон (по флагам тайлсета): игра начнётся с \
+                 застрявшим персонажем (soft-lock). Достоверность likely: плагины проходимости \
+                 статикой не учитываются."
+            )
+        }
+        Msg::PictureBeforeShow { picture_id, op } => {
+            format!(
+                "«{}» для картинки #{picture_id} стоит раньше её показа (Show Picture) в том же \
+                 списке команд — команда выполняется над ещё не показанной картинкой и ни на что не \
+                 влияет. Достоверность likely: картинку мог показать вызванный ранее скрипт/общее \
+                 событие.",
+                picture_op_label(*op, Lang::Ru)
+            )
+        }
+        Msg::EmptyAutorunPage { page, event } => {
+            format!(
+                "Автозапускаемая (Autorun) страница {page} события #{event} без условий и с пустым \
+                 списком команд — Autorun блокирует ввод, пока активен, поэтому пустой автозапуск \
+                 намертво вешает игру (soft-lock). Либо добавьте команды/условие, либо смените \
+                 триггер."
+            )
+        }
+        Msg::EmptyParallelPage { page, event } => {
+            format!(
+                "Параллельная (Parallel) страница {page} события #{event} без условий и с пустым \
+                 списком команд — выполняется каждый кадр, но ничего не делает: похоже на \
+                 забытый/недоделанный контент."
+            )
+        }
+        Msg::UnusedDbRecord { kind, id, name } => {
+            let label = name_label(name, Lang::Ru);
+            let channels = unused_channels_ru(*kind);
+            format!(
+                "{} #{id}{label} ({}) нигде не используется в данных ({channels}) — вероятно, \
+                 неиспользуемый контент. Достоверность likely: ссылки из плагинов/заметок (notetag) \
+                 статикой не отслеживаются.",
+                db_kind_label_cap_ru(*kind),
+                kind.file_stem()
+            )
+        }
+    }
+}
+
+/// Reference channels checked for an unused DB record (RU) — what "used" means.
+/// The `db-reachability` rule only emits Enemy/Skill/Weapon/Armor; the other kinds
+/// get the generic clause (kept exhaustive per the catalog convention).
+fn unused_channels_ru(kind: DbKind) -> &'static str {
+    match kind {
+        DbKind::Enemy => "нет ни в одной группе врагов и не вызывается через «Превращение врага»",
+        DbKind::Skill => {
+            "не изучается ни одним классом, не даётся чертами/эффектами, не используется врагами \
+             или событиями"
+        }
+        DbKind::Weapon | DbKind::Armor => {
+            "не продаётся, не выпадает, не надевается и не выдаётся событиями"
+        }
+        DbKind::Actor
+        | DbKind::Class
+        | DbKind::Item
+        | DbKind::Troop
+        | DbKind::State
+        | DbKind::Animation
+        | DbKind::Tileset
+        | DbKind::CommonEvent => "нет ссылок в данных",
+    }
+}
+
+/// Capitalized DB-kind label (RU) for the start of an [`Msg::UnusedDbRecord`] line.
+fn db_kind_label_cap_ru(kind: DbKind) -> &'static str {
+    match kind {
+        DbKind::Enemy => "Враг",
+        DbKind::Skill => "Навык",
+        DbKind::Weapon => "Оружие",
+        DbKind::Armor => "Броня",
+        DbKind::Actor => "Актёр",
+        DbKind::Class => "Класс",
+        DbKind::Item => "Предмет",
+        DbKind::Troop => "Группа врагов",
+        DbKind::State => "Состояние",
+        DbKind::Animation => "Анимация",
+        DbKind::Tileset => "Тайлсет",
+        DbKind::CommonEvent => "Общее событие",
     }
 }
 
@@ -1002,6 +1174,95 @@ fn render_en(msg: &Msg) -> String {
                  and load order."
             )
         }
+        Msg::TransferToBlockedTile { map_id, x, y } => {
+            format!(
+                "Transfer Player to map #{map_id} at tile ({x}, {y}), which is impassable from all \
+                 four directions (per the tileset flags) — the player cannot move off it \
+                 (soft-lock). Confidence likely: passability plugins (region passage, pixel \
+                 movement) and through-events are not accounted for."
+            )
+        }
+        Msg::StartInWall { map_id, x, y } => {
+            format!(
+                "The player's start position (System.json) is map #{map_id}, tile ({x}, {y}), which \
+                 is impassable from all four directions (per the tileset flags): the game starts \
+                 with the character stuck (soft-lock). Confidence likely: passability plugins are \
+                 not accounted for."
+            )
+        }
+        Msg::PictureBeforeShow { picture_id, op } => {
+            format!(
+                "\"{}\" for picture #{picture_id} comes before it is shown (Show Picture) in the \
+                 same command list — the command runs on a picture that does not exist yet and has \
+                 no effect. Confidence likely: the picture may have been shown by an earlier \
+                 script/common event.",
+                picture_op_label(*op, Lang::En)
+            )
+        }
+        Msg::EmptyAutorunPage { page, event } => {
+            format!(
+                "Autorun page {page} of event #{event} has no conditions and an empty command \
+                 list — Autorun blocks input while active, so an empty autorun freezes the game \
+                 (soft-lock). Add commands/a condition, or change the trigger."
+            )
+        }
+        Msg::EmptyParallelPage { page, event } => {
+            format!(
+                "Parallel page {page} of event #{event} has no conditions and an empty command \
+                 list — it runs every frame but does nothing: likely forgotten / unfinished \
+                 content."
+            )
+        }
+        Msg::UnusedDbRecord { kind, id, name } => {
+            let label = name_label(name, Lang::En);
+            let channels = unused_channels_en(*kind);
+            format!(
+                "{} #{id}{label} ({}) is referenced nowhere in the data ({channels}) — likely \
+                 unused content. Confidence likely: references from plugins/notetags are not \
+                 tracked statically.",
+                db_kind_label_cap_en(*kind),
+                kind.file_stem()
+            )
+        }
+    }
+}
+
+/// Reference channels checked for an unused DB record (EN) — what "used" means.
+/// The `db-reachability` rule only emits Enemy/Skill/Weapon/Armor; the other kinds
+/// get the generic clause (kept exhaustive per the catalog convention).
+fn unused_channels_en(kind: DbKind) -> &'static str {
+    match kind {
+        DbKind::Enemy => "not in any troop and not summoned via Enemy Transform",
+        DbKind::Skill => {
+            "not learned by any class, not granted by traits/effects, not used by enemies or events"
+        }
+        DbKind::Weapon | DbKind::Armor => "not sold, dropped, equipped, or granted by events",
+        DbKind::Actor
+        | DbKind::Class
+        | DbKind::Item
+        | DbKind::Troop
+        | DbKind::State
+        | DbKind::Animation
+        | DbKind::Tileset
+        | DbKind::CommonEvent => "no references in the data",
+    }
+}
+
+/// Capitalized DB-kind label (EN) for the start of an [`Msg::UnusedDbRecord`] line.
+fn db_kind_label_cap_en(kind: DbKind) -> &'static str {
+    match kind {
+        DbKind::Enemy => "Enemy",
+        DbKind::Skill => "Skill",
+        DbKind::Weapon => "Weapon",
+        DbKind::Armor => "Armor",
+        DbKind::Actor => "Actor",
+        DbKind::Class => "Class",
+        DbKind::Item => "Item",
+        DbKind::Troop => "Troop",
+        DbKind::State => "State",
+        DbKind::Animation => "Animation",
+        DbKind::Tileset => "Tileset",
+        DbKind::CommonEvent => "Common event",
     }
 }
 
@@ -1042,6 +1303,19 @@ fn render_chrome_ru(chrome: &Chrome) -> String {
         Chrome::CircularGatesHint => "circular-gate отключён по умолчанию (прототип): ищет тупики \
              прогрессии — связки переключателей, которые взаимно блокируют включение друг друга. \
              Включение плагин-командами не отслеживается. Показать: --circular-gates"
+            .to_string(),
+        Chrome::TilesHint => "blocked-tile отключён по умолчанию: проверяет проходимость целевых \
+             клеток (переход/старт игрока непроходим со всех сторон). Плагины проходимости \
+             (регионы, пиксельное движение) не учитываются. Показать: --tiles"
+            .to_string(),
+        Chrome::DbReachabilityHint => "db-reachability отключён по умолчанию: ищет записи БД \
+             (враги/навыки/оружие/броня), на которые нет ссылок в данных. Ссылки из \
+             плагинов/заметок не отслеживаются. Показать: --db-reachability"
+            .to_string(),
+        Chrome::PicturesHint => "picture-lifecycle отключён по умолчанию: ищет операции с \
+             картинкой (перемещение/поворот/тон/удаление) до её показа в том же списке команд. \
+             Картинки живут между событиями, поэтому показ из другого события/скрипта статикой \
+             не виден. Показать: --pictures"
             .to_string(),
         Chrome::SuppressedNote { count } => {
             format!("{count} находок(и) скрыто через .dk-doctor.toml ([[suppress]]).")
@@ -1101,6 +1375,19 @@ fn render_chrome_en(chrome: &Chrome) -> String {
         Chrome::CircularGatesHint => "circular-gate is off by default (prototype): it looks for \
              progression deadlocks — clusters of switches that mutually block each other from ever \
              turning on. A plugin command turning a switch on is not tracked. Show: --circular-gates"
+            .to_string(),
+        Chrome::TilesHint => "blocked-tile is off by default: it checks tile passability of fixed \
+             destinations (a transfer / the player start landing on a tile blocked on all sides). \
+             Passability plugins (regions, pixel movement) are not accounted for. Show: --tiles"
+            .to_string(),
+        Chrome::DbReachabilityHint => "db-reachability is off by default: it finds database records \
+             (enemies/skills/weapons/armors) referenced nowhere in the data. Plugin/notetag \
+             references are not tracked. Show: --db-reachability"
+            .to_string(),
+        Chrome::PicturesHint => "picture-lifecycle is off by default: it flags a picture operated \
+             on (move/rotate/tint/erase) before it is shown in the same command list. Pictures \
+             persist across events, so a show from another event/script is invisible to static \
+             analysis. Show: --pictures"
             .to_string(),
         Chrome::SuppressedNote { count } => {
             format!("{count} finding(s) hidden via .dk-doctor.toml ([[suppress]]).")

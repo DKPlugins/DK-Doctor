@@ -296,6 +296,45 @@ fn each_planted_rule_fires_exactly() {
         }
     ));
     assert_eq!(impossible[0].confidence, dk_doctor_core::Confidence::Likely);
+
+    // 19. picture-lifecycle: Map003 EV003 "PicOrder" page1 — Move Picture #1 (232)
+    //     precedes the Show Picture #1 (231) in the same list → the move targets a
+    //     not-yet-shown picture. Confidence Likely.
+    let picture = by_rule(&findings, "picture-lifecycle");
+    assert_eq!(picture.len(), 1, "ровно один порядок картинки");
+    assert!(matches!(
+        picture[0].message,
+        Msg::PictureBeforeShow {
+            picture_id: 1,
+            op: dk_doctor_core::PictureOp::Move
+        }
+    ));
+    assert_eq!(picture[0].confidence, dk_doctor_core::Confidence::Likely);
+
+    // 20. empty-event-page: Map003 EV002 "EmptyLoop" page1 — an unconditional
+    //     Autorun page with an empty list (only the terminator) → freeze. Warning.
+    let empty_page = by_rule(&findings, "empty-event-page");
+    assert_eq!(empty_page.len(), 1, "ровно одна пустая страница-триггер");
+    assert!(matches!(
+        empty_page[0].message,
+        Msg::EmptyAutorunPage { page: 1, event: 2 }
+    ));
+    assert_eq!(empty_page[0].severity, dk_doctor_core::Severity::Warning);
+
+    // 21. db-reachability: Armor #1 is referenced nowhere (not equipped/sold/dropped),
+    //     unlike Weapon #1 (Actor equips), Skill #1 (Class learnings) and Enemy #1
+    //     (troop member), which are controls. Info, off by default (--db-reachability).
+    let unused = by_rule(&findings, "db-reachability");
+    assert_eq!(unused.len(), 1, "ровно одна неиспользуемая запись БД");
+    assert!(matches!(
+        unused[0].message,
+        Msg::UnusedDbRecord {
+            kind: dk_doctor_core::DbKind::Armor,
+            id: 1,
+            ..
+        }
+    ));
+    assert_eq!(unused[0].severity, dk_doctor_core::Severity::Info);
 }
 
 /// Entity name appearing in the message (for control checks).
@@ -365,10 +404,11 @@ fn summary_counts_match() {
     // Warnings: uninitialized-symbols + dead-variables +
     // dead-code-after-exit ×2 + dead-self-switch + unreachable-self-switch +
     // cyclic-common-events + shadowed-page + stuck-autorun +
-    // unknown-plugin-command + impossible-condition.
-    assert_eq!(report.summary.warnings, 11, "11 предупреждений");
+    // unknown-plugin-command + impossible-condition + picture-lifecycle +
+    // empty-event-page.
+    assert_eq!(report.summary.warnings, 13, "13 предупреждений");
     // Info: unreachable-maps + orphan-assets + dead-common-event ×3 (CE #2 +
-    // the mutually-dead cluster CE #3/#4).
-    assert_eq!(report.summary.infos, 5, "5 информационных");
+    // the mutually-dead cluster CE #3/#4) + db-reachability (Armor #1).
+    assert_eq!(report.summary.infos, 6, "6 информационных");
     assert_eq!(report.exit_code(), 2, "код выхода 2 (есть ошибки)");
 }
