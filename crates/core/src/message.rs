@@ -103,6 +103,18 @@ pub enum Msg {
         /// Asset file name (without extension).
         name: String,
     },
+    /// A reference whose asset exists on disk but under a different letter case.
+    /// Loads on case-insensitive filesystems (Windows/macOS) yet fails on
+    /// case-sensitive ones (Linux servers, web builds) — a portability bug with a
+    /// safe, case-only rename fix.
+    AssetCaseMismatch {
+        /// Asset folder (e.g. `img/pictures`).
+        folder: String,
+        /// Name as referenced in the data (wrong case).
+        referenced: String,
+        /// Name as it actually appears on disk (correct case).
+        on_disk: String,
+    },
     /// An asset on disk that nothing references (possibly unused).
     OrphanAsset {
         /// Asset folder (e.g. `img/pictures`).
@@ -588,6 +600,18 @@ fn render_ru(msg: &Msg) -> String {
         Msg::BrokenAsset { folder, name } => {
             format!("Ссылка на ассет «{name}» в {folder}/, которого нет на диске — не загрузится.")
         }
+        Msg::AssetCaseMismatch {
+            folder,
+            referenced,
+            on_disk,
+        } => {
+            format!(
+                "Ссылка на ассет «{referenced}» в {folder}/, но на диске файл называется «{on_disk}» \
+                 (отличается только регистром букв). На Windows/macOS загрузится, а на \
+                 регистрозависимых системах (серверы Linux, веб-сборки) — нет. Приведите регистр \
+                 ссылки к «{on_disk}» или переименуйте файл."
+            )
+        }
         Msg::OrphanAsset { folder, name } => {
             format!(
                 "Файл «{name}» в {folder}/ присутствует, но на него нет ссылок в данных — \
@@ -972,6 +996,18 @@ fn render_en(msg: &Msg) -> String {
             format!(
                 "Reference to asset \"{name}\" in {folder}/, which is not on disk — \
                  it will not load."
+            )
+        }
+        Msg::AssetCaseMismatch {
+            folder,
+            referenced,
+            on_disk,
+        } => {
+            format!(
+                "Reference to asset \"{referenced}\" in {folder}/, but the file on disk is named \
+                 \"{on_disk}\" (differs only in letter case). It loads on Windows/macOS but not on \
+                 case-sensitive systems (Linux servers, web builds). Align the reference case with \
+                 \"{on_disk}\" or rename the file."
             )
         }
         Msg::OrphanAsset { folder, name } => {

@@ -7,6 +7,7 @@
 pub mod finding;
 pub mod ir;
 pub mod message;
+pub mod remediation;
 pub mod report;
 pub mod rules;
 
@@ -22,6 +23,7 @@ pub use ir::{
 pub use message::{
     Chrome, Lang, LoadErrorKind, Msg, PluginOrderTag, SymbolKind, render, render_chrome,
 };
+pub use remediation::{Fix, FixKind, Remediation, autofix, remediation};
 pub use report::{Report, Summary};
 pub use rules::{Registry, Rule, RuleCtx};
 

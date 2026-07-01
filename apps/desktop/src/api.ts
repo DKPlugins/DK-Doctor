@@ -25,6 +25,26 @@ export interface Reference {
   path: string;
 }
 
+/** Remediation metadata attached to a finding (mirror of Rust `Remediation`). */
+export interface Remediation {
+  /** One-line impact ("why it matters"), in the report language. */
+  why: string;
+  /** One-line concrete action ("how to fix"), in the report language. */
+  suggested_fix: string;
+  /** Deep link to the rule's documentation section (language-neutral). */
+  docs_url: string;
+}
+
+/** A safe, machine-applicable fix (mirror of Rust `Fix`). */
+export interface Fix {
+  /** Only kind today: align an asset reference's case with the on-disk file. */
+  kind: "asset_case_rename";
+  /** Current (offending) text. */
+  from: string;
+  /** Corrected text. */
+  to: string;
+}
+
 /** A single finding from the JSON artifact (mirror of `report_json.rs`). */
 export interface Finding {
   rule: string;
@@ -41,6 +61,10 @@ export interface Finding {
   /** Ready-made localized text — displayed verbatim. */
   message: string;
   references: Reference[];
+  /** Remediation metadata; optional to stay safe on older cached snapshots. */
+  remediation?: Remediation;
+  /** A safe machine-applicable fix, when the finding has one. */
+  fix?: Fix;
 }
 
 /** Summary by severity level. */
