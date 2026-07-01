@@ -163,11 +163,18 @@ pub fn build(root: &Utf8Path) -> Result<(Ir, LoadWarnings), crate::AdapterError>
 
     // Plugins (Tier A/B): parsing annotations + JS of enabled plugins →
     // declared_by_plugin, provided assets, command registry, patches, load order.
-    let plugins = collect_plugins(&mut b, &layout, &mut warns);
+    let (plugins, plugins_js) = collect_plugins(&mut b, &layout, &mut warns);
 
     // Profiles + `.dk-doctor`: post-processing of facts (asset_roots/localization,
-    // ignore globs, map_param). Runs ALWAYS (ignore globs work even without plugins).
-    crate::profiles::apply(&mut b, &layout.base, &plugins, &mut warns.messages);
+    // ignore globs, map_param, and the curated per-plugin param/command/dependency
+    // tables). Runs ALWAYS (ignore globs work even without plugins).
+    crate::profiles::apply(
+        &mut b,
+        &layout.base,
+        &plugins_js,
+        &plugins,
+        &mut warns.messages,
+    );
 
     Ok((b.finish(), warns))
 }
@@ -176,12 +183,14 @@ pub fn build(root: &Utf8Path) -> Result<(Ir, LoadWarnings), crate::AdapterError>
 /// facts into the IR. Absence of `plugins.js` is not an error (a project without plugins).
 /// Returns ALL plugins (name + `parameters` + whether enabled, in load order) —
 /// for post-processing by profiles (`provided_subdir`/`map_param` read parameter
-/// values; `map_param` applies to disabled plugins too).
+/// values; `map_param` applies to disabled plugins too) — together with the
+/// `plugins.js` path relative to the project base (for profile-emitted edge
+/// locations).
 fn collect_plugins(
     b: &mut IrBuilder,
     layout: &Layout,
     warns: &mut LoadWarnings,
-) -> Vec<(String, std::collections::BTreeMap<String, String>, bool)> {
+) -> (Vec<crate::plugins::PluginParams>, Utf8PathBuf) {
     let candidates = [
         layout.base.join("js").join("plugins.js"),
         layout.base.join("plugins.js"),
@@ -205,13 +214,14 @@ fn collect_plugins(
         }
     }
     if entries.is_empty() {
-        return Vec::new();
+        return (Vec::new(), plugins_js);
     }
     crate::plugins::collect::collect(b, &entries, &plugins_dir, &plugins_js, &mut warns.messages);
-    entries
+    let plugins = entries
         .iter()
         .map(|p| (p.name.clone(), p.parameters.clone(), p.status))
-        .collect()
+        .collect();
+    (plugins, plugins_js)
 }
 
 /// Engine heuristic: first by core scripts (reliable), then `effects/` and 357.

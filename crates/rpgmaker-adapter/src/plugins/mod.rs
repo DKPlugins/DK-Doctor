@@ -9,3 +9,7 @@
 pub mod annotations;
 pub mod collect;
 pub mod js;
+
+/// A plugin as seen by profile post-processing: `(name, plugins.js parameters,
+/// enabled)`, in load order. Shared by the collector and the profile layer.
+pub(crate) type PluginParams = (String, std::collections::BTreeMap<String, String>, bool);
