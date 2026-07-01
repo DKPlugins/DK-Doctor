@@ -301,6 +301,7 @@ impl WalkCtx {
 /// 355 + consecutive 655 into a single block and parsed by Tier B (see
 /// [`script_block`]). Other commands go through [`interpret`].
 pub fn walk(b: &mut IrBuilder, ctx: &WalkCtx, list: &[EventCommand]) {
+    picture_lifecycle(b, ctx, list);
     let mut env = ConstEnv::default();
     let mut i = 0usize;
     while i < list.len() {
@@ -341,6 +342,94 @@ pub fn walk(b: &mut IrBuilder, ctx: &WalkCtx, list: &[EventCommand]) {
         }
         i += 1;
     }
+}
+
+/// Detects picture operations (Move/Rotate/Tint/Erase, 232/233/234/235) that run
+/// **before** the matching Show Picture (231) on the same straight-line sequence.
+///
+/// Such an operation targets a picture that does not exist yet — a no-op / ordering
+/// mistake. False-positive guards:
+/// - **cross-branch**: a fact is emitted only when the op and the first show of that
+///   picture id are at the **same indent** with no command between them exiting to a
+///   shallower/sibling scope (so an op in one `if`-branch and the show in the sibling
+///   branch is not flagged);
+/// - **loop back-edge**: an op inside a loop body (112…413) is skipped — on
+///   iterations 2+ the picture persists from the previous iteration's Show, so an
+///   erase/redraw-in-loop idiom is legitimate (mirrors [`invalidate_loop_body_writes`]);
+/// - **no Show in this list**: skipped (the picture may have been shown by another
+///   event/script that persists across command lists).
+///
+/// Even so, cross-command-list persistence cannot be proven statically, so the
+/// `picture-lifecycle` rule reports at `likely` confidence and is opt-in.
+fn picture_lifecycle(b: &mut IrBuilder, ctx: &WalkCtx, list: &[EventCommand]) {
+    use dk_doctor_core::ir::{PictureMisuse, PictureOp};
+    // First Show index per picture id.
+    let mut first_show: HashMap<u32, usize> = HashMap::new();
+    for (i, cmd) in list.iter().enumerate() {
+        if cmd.code == codes::SHOW_PICTURE
+            && let Some(pid) = cmd.as_u64(0).map(|v| v as u32)
+            && pid != 0
+        {
+            first_show.entry(pid).or_insert(i);
+        }
+    }
+    if first_show.is_empty() {
+        return;
+    }
+    for (i, cmd) in list.iter().enumerate() {
+        let op = match cmd.code {
+            codes::MOVE_PICTURE => PictureOp::Move,
+            codes::ROTATE_PICTURE => PictureOp::Rotate,
+            codes::TINT_PICTURE => PictureOp::Tint,
+            codes::ERASE_PICTURE => PictureOp::Erase,
+            _ => continue,
+        };
+        let Some(pid) = cmd.as_u64(0).map(|v| v as u32).filter(|&p| p != 0) else {
+            continue;
+        };
+        let Some(&show_idx) = first_show.get(&pid) else {
+            continue;
+        };
+        if i >= show_idx {
+            continue;
+        }
+        // Loop back-edge: an op inside a loop body may run after a prior iteration's
+        // Show (the picture persists), so it is not operating on a missing picture.
+        if inside_loop(list, i) {
+            continue;
+        }
+        // Same execution path: equal indent, and no command between them dedents
+        // below that indent (which would mark a sibling/parent scope boundary).
+        if cmd.indent != list[show_idx].indent {
+            continue;
+        }
+        if list[(i + 1)..show_idx]
+            .iter()
+            .any(|c| c.indent < cmd.indent)
+        {
+            continue;
+        }
+        b.add_picture_misuse(PictureMisuse {
+            picture_id: pid,
+            op,
+            location: ctx.loc(i as u32),
+        });
+    }
+}
+
+/// Whether the command at `idx` sits inside an open loop body (net `112` Loop minus
+/// `413` Repeat Above before it is positive). Used by [`picture_lifecycle`] to spare
+/// erase/redraw-in-loop idioms, where the picture persists across iterations.
+fn inside_loop(list: &[EventCommand], idx: usize) -> bool {
+    let mut depth: i32 = 0;
+    for c in &list[..idx] {
+        if c.code == codes::LOOP {
+            depth += 1;
+        } else if c.code == codes::REPEAT_ABOVE {
+            depth -= 1;
+        }
+    }
+    depth > 0
 }
 
 fn interpret(b: &mut IrBuilder, ctx: &WalkCtx, cmd: &EventCommand, idx: u32, env: &mut ConstEnv) {
@@ -1209,4 +1298,105 @@ fn plugin_command_mv(b: &mut IrBuilder, ctx: &WalkCtx, cmd: &EventCommand, idx: 
         },
         ctx.loc(idx),
     );
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use dk_doctor_core::ir::{Engine, Entity, Ir, Page, PageTrigger, PictureOp};
+
+    fn cmd(code: u16, indent: i32, params: Vec<serde_json::Value>) -> EventCommand {
+        EventCommand {
+            code,
+            indent,
+            parameters: params,
+        }
+    }
+
+    /// Runs the picture-lifecycle scan over a list and returns `(picture_id, op)`.
+    fn picture_misuses(list: &[EventCommand]) -> Vec<(u32, PictureOp)> {
+        let mut b = Ir::builder(Engine::Mz);
+        let entity = b.push_entity(
+            Entity::Page(Page {
+                conditions: Default::default(),
+                trigger: PageTrigger::Action,
+                command_count: list.len() as u32,
+                commands: vec![],
+            }),
+            Location::file_only("data/Map001.json"),
+        );
+        let ctx = WalkCtx {
+            entity,
+            file: camino::Utf8PathBuf::from("data/Map001.json"),
+            base_path: Vec::new(),
+            self_switch_scope: None,
+            gate_switches: Vec::new(),
+        };
+        walk(&mut b, &ctx, list);
+        b.finish()
+            .picture_misuses
+            .iter()
+            .map(|m| (m.picture_id, m.op))
+            .collect()
+    }
+
+    #[test]
+    fn flags_move_before_show_linear() {
+        let list = [
+            cmd(codes::MOVE_PICTURE, 0, vec![1.into()]),
+            cmd(codes::SHOW_PICTURE, 0, vec![1.into(), "".into()]),
+        ];
+        assert_eq!(picture_misuses(&list), vec![(1, PictureOp::Move)]);
+    }
+
+    #[test]
+    fn ignores_move_after_show() {
+        let list = [
+            cmd(codes::SHOW_PICTURE, 0, vec![1.into(), "".into()]),
+            cmd(codes::MOVE_PICTURE, 0, vec![1.into()]),
+        ];
+        assert!(picture_misuses(&list).is_empty());
+    }
+
+    #[test]
+    fn ignores_op_on_different_picture_than_shown() {
+        // Erase picture 2, but only picture 1 is shown here → picture 2 unrelated.
+        let list = [
+            cmd(codes::ERASE_PICTURE, 0, vec![2.into()]),
+            cmd(codes::SHOW_PICTURE, 0, vec![1.into(), "".into()]),
+        ];
+        assert!(picture_misuses(&list).is_empty());
+    }
+
+    #[test]
+    fn ignores_cross_branch_op_and_show() {
+        // if switch#1 { Move pic 1 } else { Show pic 1 } — mutually exclusive paths.
+        let list = [
+            cmd(codes::CONDITIONAL_BRANCH, 0, vec![0.into(), 1.into()]),
+            cmd(codes::MOVE_PICTURE, 1, vec![1.into()]),
+            cmd(411, 0, vec![]), // ELSE marker (dedents below the op's indent)
+            cmd(codes::SHOW_PICTURE, 1, vec![1.into(), "".into()]),
+            cmd(0, 0, vec![]),
+        ];
+        assert!(picture_misuses(&list).is_empty());
+    }
+
+    #[test]
+    fn ignores_op_without_any_show_in_list() {
+        let list = [cmd(codes::ERASE_PICTURE, 0, vec![1.into()])];
+        assert!(picture_misuses(&list).is_empty());
+    }
+
+    #[test]
+    fn ignores_erase_before_show_inside_a_loop() {
+        // loop { Erase pic 1; Show pic 1; ... } — a legitimate redraw idiom: on
+        // iterations 2+ the picture persists from the previous Show. Not flagged.
+        let list = [
+            cmd(codes::LOOP, 0, vec![]),
+            cmd(codes::ERASE_PICTURE, 1, vec![1.into()]),
+            cmd(codes::SHOW_PICTURE, 1, vec![1.into(), "".into()]),
+            cmd(codes::REPEAT_ABOVE, 0, vec![]),
+        ];
+        assert!(picture_misuses(&list).is_empty());
+    }
 }

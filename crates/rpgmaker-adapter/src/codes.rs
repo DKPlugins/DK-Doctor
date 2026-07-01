@@ -72,6 +72,9 @@ pub const SHOP_GOODS_ROW: u16 = 605;
 // --- Pictures / media / map visuals (§1.6) ---
 pub const SHOW_PICTURE: u16 = 231;
 pub const MOVE_PICTURE: u16 = 232;
+pub const ROTATE_PICTURE: u16 = 233;
+pub const TINT_PICTURE: u16 = 234;
+pub const ERASE_PICTURE: u16 = 235;
 pub const PLAY_BGM: u16 = 241;
 pub const PLAY_BGS: u16 = 245;
 pub const PLAY_ME: u16 = 249;

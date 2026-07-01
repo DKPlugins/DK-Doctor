@@ -36,6 +36,12 @@ pub struct System {
     /// Start map id.
     #[serde(default, rename = "startMapId")]
     pub start_map_id: u32,
+    /// Player start tile x on the start map.
+    #[serde(default, rename = "startX")]
+    pub start_x: u32,
+    /// Player start tile y on the start map.
+    #[serde(default, rename = "startY")]
+    pub start_y: u32,
     /// Id of the map opened in the editor (editMapId).
     #[serde(default, rename = "editMapId")]
     pub edit_map_id: u32,

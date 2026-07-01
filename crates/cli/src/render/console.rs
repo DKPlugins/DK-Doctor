@@ -89,6 +89,46 @@ pub fn print_circular_gates_hint(lang: Lang) {
     println!();
 }
 
+/// Prints a hint that `blocked-tile` (tile passability) is disabled by default.
+///
+/// Passability plugins (region passage, pixel movement) are not accounted for, so
+/// the spatial rule stays opt-in like the other `likely` prototypes.
+pub fn print_tiles_hint(lang: Lang) {
+    println!(
+        "  {} {}",
+        render_chrome(&Chrome::HintPrefix, lang).dimmed(),
+        render_chrome(&Chrome::TilesHint, lang)
+    );
+    println!();
+}
+
+/// Prints a hint that `db-reachability` (unused DB records) is disabled by default.
+///
+/// Plugin/notetag references are not tracked, so the rule is opt-in like
+/// `orphan-assets`.
+pub fn print_db_reachability_hint(lang: Lang) {
+    println!(
+        "  {} {}",
+        render_chrome(&Chrome::HintPrefix, lang).dimmed(),
+        render_chrome(&Chrome::DbReachabilityHint, lang)
+    );
+    println!();
+}
+
+/// Prints a hint that `picture-lifecycle` is disabled by default.
+///
+/// Pictures persist across command lists, so a picture shown by another
+/// event/script cannot be seen statically → the rule is opt-in like the other
+/// `likely` prototypes.
+pub fn print_pictures_hint(lang: Lang) {
+    println!(
+        "  {} {}",
+        render_chrome(&Chrome::HintPrefix, lang).dimmed(),
+        render_chrome(&Chrome::PicturesHint, lang)
+    );
+    println!();
+}
+
 /// Prints the list of project files that could not be parsed (skipped), so the
 /// report is not silently partial. A no-op when there are no warnings.
 pub fn print_parse_warnings(warnings: &[String], lang: Lang) {

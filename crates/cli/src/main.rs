@@ -45,6 +45,9 @@ struct Effective {
     orphans: bool,
     dead_common_events: bool,
     circular_gates: bool,
+    tiles: bool,
+    db_reachability: bool,
+    pictures: bool,
     min_severity: Option<Severity>,
     fail_on: Option<FailOn>,
     suppressed: HashSet<String>,
@@ -112,6 +115,9 @@ fn main() -> ExitCode {
     let orphans_active = registry.rule_ids().any(|id| id == "orphan-assets");
     let dead_ce_active = registry.rule_ids().any(|id| id == "dead-common-event");
     let circular_gates_active = registry.rule_ids().any(|id| id == "circular-gate");
+    let tiles_active = registry.rule_ids().any(|id| id == "blocked-tile");
+    let db_reachability_active = registry.rule_ids().any(|id| id == "db-reachability");
+    let pictures_active = registry.rule_ids().any(|id| id == "picture-lifecycle");
 
     let ctx = RuleCtx::with_codes(
         &ir,
@@ -188,6 +194,15 @@ fn main() -> ExitCode {
             if !circular_gates_active {
                 render::console::print_circular_gates_hint(lang);
             }
+            if !tiles_active {
+                render::console::print_tiles_hint(lang);
+            }
+            if !db_reachability_active {
+                render::console::print_db_reachability_hint(lang);
+            }
+            if !pictures_active {
+                render::console::print_pictures_hint(lang);
+            }
             if suppressed_count > 0 {
                 eprintln!(
                     "{}",
@@ -256,6 +271,9 @@ fn resolve_effective(args: &Args, cfg: &FileConfig) -> Result<Effective, String>
         orphans: args.orphans || cfg.orphans,
         dead_common_events: args.dead_common_events || cfg.dead_common_events,
         circular_gates: args.circular_gates || cfg.circular_gates,
+        tiles: args.tiles || cfg.tiles,
+        db_reachability: args.db_reachability || cfg.db_reachability,
+        pictures: args.pictures || cfg.pictures,
         min_severity,
         fail_on,
         suppressed: cfg.suppressed_fingerprints(),
@@ -294,6 +312,12 @@ fn build_registry(eff: &Effective) -> Registry {
             eff.dead_common_events || eff.enable.iter().any(|e| e == id)
         } else if id == "circular-gate" {
             eff.circular_gates || eff.enable.iter().any(|e| e == id)
+        } else if id == "blocked-tile" {
+            eff.tiles || eff.enable.iter().any(|e| e == id)
+        } else if id == "db-reachability" {
+            eff.db_reachability || eff.enable.iter().any(|e| e == id)
+        } else if id == "picture-lifecycle" {
+            eff.pictures || eff.enable.iter().any(|e| e == id)
         } else if eff.enable.is_empty() {
             true
         } else {
@@ -331,6 +355,10 @@ fn builtin_rules() -> Vec<Box<dyn dk_doctor_core::Rule>> {
         Box::new(rules::plugin_conflict::PluginConflict),
         Box::new(rules::vehicle_start_map::VehicleStartMap),
         Box::new(rules::circular_gate::CircularGate),
+        Box::new(rules::picture_lifecycle::PictureLifecycle),
+        Box::new(rules::empty_event_page::EmptyEventPage),
+        Box::new(rules::blocked_tile::BlockedTile),
+        Box::new(rules::db_reachability::DbReachability),
     ]
 }
 
@@ -369,10 +397,33 @@ mod tests {
         assert!(!active.iter().any(|id| id == "dead-common-event"));
         // The progression-deadlock prototype is off by default too.
         assert!(!active.iter().any(|id| id == "circular-gate"));
+        // Spatial + DB-reachability + picture-lifecycle prototypes are off by
+        // default (all FP-prone `likely` rules, like the others above).
+        assert!(!active.iter().any(|id| id == "blocked-tile"));
+        assert!(!active.iter().any(|id| id == "db-reachability"));
+        assert!(!active.iter().any(|id| id == "picture-lifecycle"));
         // Regular rules stay enabled.
         assert!(active.iter().any(|id| id == "referential-integrity"));
         assert!(active.iter().any(|id| id == "cyclic-common-events"));
         assert!(active.iter().any(|id| id == "dead-self-switch"));
+        // empty-event-page is the one new default-on rule (low false-positive rate).
+        assert!(active.iter().any(|id| id == "empty-event-page"));
+    }
+
+    #[test]
+    fn tiles_db_reachability_and_pictures_flags_enable_their_rules() {
+        let with_tiles = ids(&[".", "--tiles"]);
+        assert!(with_tiles.iter().any(|id| id == "blocked-tile"));
+        assert!(!with_tiles.iter().any(|id| id == "db-reachability"));
+        assert!(!with_tiles.iter().any(|id| id == "picture-lifecycle"));
+
+        let with_db = ids(&[".", "--db-reachability"]);
+        assert!(with_db.iter().any(|id| id == "db-reachability"));
+        assert!(!with_db.iter().any(|id| id == "blocked-tile"));
+
+        let with_pics = ids(&[".", "--pictures"]);
+        assert!(with_pics.iter().any(|id| id == "picture-lifecycle"));
+        assert!(!with_pics.iter().any(|id| id == "blocked-tile"));
     }
 
     #[test]

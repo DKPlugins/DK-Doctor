@@ -50,6 +50,69 @@ pub struct VehicleStartMap {
     pub location: Location,
 }
 
+/// How a picture is operated on before it exists (for [`PictureMisuse`]).
+///
+/// A Move/Rotate/Tint/Erase Picture command targeting a picture id that has not
+/// been Shown yet on the same straight-line command sequence. Engine-independent:
+/// the adapter maps the numeric command codes (232/233/234/235) to these.
+#[derive(Copy, Clone, Debug, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PictureOp {
+    /// Move Picture (232).
+    Move,
+    /// Rotate Picture (233).
+    Rotate,
+    /// Tint Picture (234).
+    Tint,
+    /// Erase Picture (235).
+    Erase,
+}
+
+/// The fact "a picture is operated on before it is shown" within one command list
+/// (Tier: static data over a single straight-line sequence). Produced by the
+/// adapter (it holds the picture ids and command ordering); consumed by the
+/// `picture-lifecycle` rule. The operation runs on a picture that does not exist
+/// yet, so it is a no-op / logic mistake.
+#[derive(Clone, Debug, serde::Serialize)]
+pub struct PictureMisuse {
+    /// Picture id (RPG Maker picture slot).
+    pub picture_id: u32,
+    /// The offending operation.
+    pub op: PictureOp,
+    /// Location of the offending command.
+    pub location: Location,
+}
+
+/// Which start position lands on an impassable tile (for [`BlockedTile`]).
+#[derive(Copy, Clone, Debug, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum BlockedTileKind {
+    /// A Transfer Player (201) destination.
+    Transfer,
+    /// The player's start position (System.json startMapId/startX/startY).
+    PlayerStart,
+}
+
+/// The fact "a fixed destination lands on a tile impassable from all four
+/// directions" — the player would be unable to move off it (soft-lock).
+///
+/// Produced by the adapter's spatial pass (RPG Maker tileset passage flags live
+/// there); consumed by the `blocked-tile` rule. Confidence is `likely`: passability
+/// plugins (region passage, pixel movement) are not accounted for.
+#[derive(Clone, Debug, serde::Serialize)]
+pub struct BlockedTile {
+    /// Which kind of destination this is.
+    pub kind: BlockedTileKind,
+    /// Target map id.
+    pub map_id: u32,
+    /// Target tile x (in tiles).
+    pub x: u32,
+    /// Target tile y (in tiles).
+    pub y: u32,
+    /// Location of the fact (the transfer command / System.json).
+    pub location: Location,
+}
+
 /// A place that turns a global switch **ON** (Control Switches, 121) together with
 /// the global switches that must already be ON for that place to run (its "gate":
 /// the map-event page's switch conditions, or a triggered common event's switch).
@@ -134,6 +197,12 @@ pub struct Ir {
     /// freely settable, since we cannot prove they are only turned on behind a
     /// gate.
     pub script_written_switches: FxHashSet<u32>,
+    /// Fixed destinations (transfers / player start) that land on a tile
+    /// impassable from all four directions. Input to the `blocked-tile` rule.
+    pub blocked_tiles: Vec<BlockedTile>,
+    /// Picture operations (Move/Rotate/Tint/Erase) that run before the picture is
+    /// Shown on the same command sequence. Input to the `picture-lifecycle` rule.
+    pub picture_misuses: Vec<PictureMisuse>,
 }
 
 impl Ir {
@@ -179,6 +248,8 @@ pub struct IrBuilder {
     opaque_common_events: FxHashSet<u32>,
     switch_gates: Vec<SwitchGate>,
     script_written_switches: FxHashSet<u32>,
+    blocked_tiles: Vec<BlockedTile>,
+    picture_misuses: Vec<PictureMisuse>,
 }
 
 impl IrBuilder {
@@ -203,6 +274,8 @@ impl IrBuilder {
             opaque_common_events: FxHashSet::default(),
             switch_gates: Vec::new(),
             script_written_switches: FxHashSet::default(),
+            blocked_tiles: Vec::new(),
+            picture_misuses: Vec::new(),
         }
     }
 
@@ -317,6 +390,18 @@ impl IrBuilder {
         self.asset_refs.push((key, location));
     }
 
+    /// Registers a fixed destination that lands on a fully-blocked tile (for the
+    /// `blocked-tile` rule).
+    pub fn add_blocked_tile(&mut self, tile: BlockedTile) {
+        self.blocked_tiles.push(tile);
+    }
+
+    /// Registers a picture operation that runs before the picture is shown (for
+    /// the `picture-lifecycle` rule).
+    pub fn add_picture_misuse(&mut self, misuse: PictureMisuse) {
+        self.picture_misuses.push(misuse);
+    }
+
     /// Mutable access to the symbol table for populating sites.
     pub fn symbols_mut(&mut self) -> &mut SymbolTable {
         &mut self.symbols
@@ -409,6 +494,8 @@ impl IrBuilder {
             common_event_summaries,
             switch_gates: self.switch_gates,
             script_written_switches: self.script_written_switches,
+            blocked_tiles: self.blocked_tiles,
+            picture_misuses: self.picture_misuses,
         }
     }
 }

@@ -23,7 +23,10 @@ pub use entity::{
     CeTrigger, CommandMeta, CommonEvent, DatabaseRecord, DbKind, Entity, EntityId, EntityNode,
     Event, Map, Page, PageConditions, PageTrigger, PluginRef, ScriptBlackbox, Troop,
 };
-pub use graph::{Engine, Ir, IrBuilder, SwitchGate, VehicleKind, VehicleStartMap};
+pub use graph::{
+    BlockedTile, BlockedTileKind, Engine, Ir, IrBuilder, PictureMisuse, PictureOp, SwitchGate,
+    VehicleKind, VehicleStartMap,
+};
 pub use location::{Location, LocationPath, PathSeg};
 pub use plugin_meta::{MethodPatch, PluginCommand, PluginCommandCall, PluginMeta, PluginOrderDeps};
 pub use self_switch::{SelfSwitchInfo, SelfSwitchKey, SelfSwitchTable};

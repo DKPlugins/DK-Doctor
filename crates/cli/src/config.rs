@@ -101,6 +101,12 @@ pub struct FileConfig {
     pub dead_common_events: bool,
     /// Enable the opt-in `circular-gate` rule (progression-deadlock prototype).
     pub circular_gates: bool,
+    /// Enable the opt-in `blocked-tile` rule (tile passability of transfers/start).
+    pub tiles: bool,
+    /// Enable the opt-in `db-reachability` rule (DB records referenced nowhere).
+    pub db_reachability: bool,
+    /// Enable the opt-in `picture-lifecycle` rule (picture operated before shown).
+    pub pictures: bool,
     /// Baseline file path (relative to the project root) for `fail_on = "new"`.
     pub baseline: Option<String>,
     /// Documented suppressions (TOML `[[suppress]]`).

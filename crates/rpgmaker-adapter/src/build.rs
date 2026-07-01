@@ -6,12 +6,13 @@
 
 use crate::command::EventCommand;
 use crate::raw::{common_event::CommonEvent, database, map, plugins, system::System};
-use crate::{assets, db_edges, interpreter};
+use crate::{assets, db_edges, interpreter, spatial};
 use camino::{Utf8Path, Utf8PathBuf};
 use dk_doctor_core::ir::{
     AssetKey, AssetKind, CeTrigger, CommandMeta, DbKind, Edge, Engine, Entity, EntityId, Ir,
     IrBuilder, Location, PageConditions, PageTrigger, PathSeg, Site,
 };
+use rustc_hash::FxHashMap;
 
 /// Builds `Vec<CommandMeta>` for a page — a snapshot of the code/indent/index/location
 /// of each command (needed by the `dead-code-after-exit` rule, so it doesn't re-read
@@ -142,10 +143,17 @@ pub fn build(root: &Utf8Path) -> Result<(Ir, LoadWarnings), crate::AdapterError>
     load_common_events(&mut b, &data, &mut warns);
 
     // Maps.
-    load_maps(&mut b, &data, &mut warns);
+    let map_spatial = load_maps(&mut b, &data, &mut warns);
 
     // Enemy groups (Troops).
     load_troops(&mut b, &data, &mut warns);
+
+    // Spatial (tile passability): transfers / the player start landing on a tile
+    // impassable from all four directions. Uses the retained map grids + tileset
+    // passage flags. Always computed (like switch_gates/dead_branches); the
+    // consuming `blocked-tile` rule is opt-in at the CLI level.
+    let tileset_flags = collect_tileset_flags(&data);
+    spatial::resolve(&mut b, &system, &map_spatial, &tileset_flags);
 
     // Asset references from data fields (System/Actors/Enemies/Tilesets/Map already partly above).
     collect_system_asset_refs(&mut b, &system);
@@ -501,7 +509,7 @@ fn load_common_events(b: &mut IrBuilder, data: &Utf8Path, warns: &mut LoadWarnin
     }
 }
 
-fn load_maps(b: &mut IrBuilder, data: &Utf8Path, warns: &mut LoadWarnings) {
+fn load_maps(b: &mut IrBuilder, data: &Utf8Path, warns: &mut LoadWarnings) -> spatial::Collector {
     // Map names are taken from MapInfos.
     let infos = read_to_string(&data.join("MapInfos.json"))
         .and_then(|t| serde_json::from_str::<Vec<Option<map::MapInfo>>>(&t).ok())
@@ -512,6 +520,7 @@ fn load_maps(b: &mut IrBuilder, data: &Utf8Path, warns: &mut LoadWarnings) {
     }
 
     // We iterate over MapNNN.json by numbers from MapInfos and simply by directory files.
+    let mut collector = spatial::Collector::default();
     let ids = collect_map_ids(data, &names);
     for map_id in ids {
         let file = format!("Map{map_id:03}.json");
@@ -527,7 +536,30 @@ fn load_maps(b: &mut IrBuilder, data: &Utf8Path, warns: &mut LoadWarnings) {
         };
         warns.parsed_files += 1;
         load_one_map(b, map_id, &names, &m, &file);
+        // Retain the grid + fixed transfers for the spatial pass (moves `m`, so its
+        // tile array is not cloned — the IR walk above no longer needs it).
+        let file_path = Utf8PathBuf::from(format!("data/{file}"));
+        collector.add_map(map_id, &file_path, m);
     }
+    collector
+}
+
+/// Reads `Tilesets.json` into `tilesetId → passage flags` for the spatial pass.
+/// Tolerant to junk (a missing/broken file yields an empty map — the spatial pass
+/// then never flags, rather than mis-flagging).
+fn collect_tileset_flags(data: &Utf8Path) -> FxHashMap<u32, Vec<u32>> {
+    let mut out = FxHashMap::default();
+    let Some(text) = read_to_string(&data.join("Tilesets.json")) else {
+        return out;
+    };
+    if let Ok(table) = database::parse_table::<database::Tileset>(&text) {
+        for ts in table.into_iter().flatten() {
+            if ts.id != 0 {
+                out.insert(ts.id, ts.flags);
+            }
+        }
+    }
+    out
 }
 
 fn collect_map_ids(data: &Utf8Path, names: &std::collections::HashMap<u32, String>) -> Vec<u32> {
@@ -1160,6 +1192,87 @@ mod tests {
             f.location.path.to_string(),
             "plugin:Immortalizer/param:Immortal"
         );
+
+        let _ = std::fs::remove_dir_all(root.as_std_path());
+    }
+
+    #[test]
+    fn blocked_tile_player_start_end_to_end() {
+        use dk_doctor_core::ir::BlockedTileKind;
+        // Player starts on map 1 at (0,0), which is a wall (all four directions
+        // impassable). The spatial pass should emit one PlayerStart blocked tile.
+        let root = temp_root("blocked_start");
+        let data = root.join("data");
+        std::fs::create_dir_all(data.as_std_path()).unwrap();
+        std::fs::write(
+            data.join("System.json").as_std_path(),
+            br#"{"switches":["",""],"variables":["",""],"startMapId":1,"startX":0,"startY":0}"#,
+        )
+        .unwrap();
+        // Tileset #1: tile id 1 is impassable from all four directions (flag 0x0f).
+        std::fs::write(
+            data.join("Tilesets.json").as_std_path(),
+            br#"[null,{"id":1,"name":"T","tilesetNames":[],"flags":[16,15]}]"#,
+        )
+        .unwrap();
+        // 1x1 map, ground layer (z=0) tile id 1 → the start lands on the wall.
+        std::fs::write(
+            data.join("Map001.json").as_std_path(),
+            br#"{"width":1,"height":1,"tilesetId":1,"data":[1,0,0,0,0,0],"events":[]}"#,
+        )
+        .unwrap();
+
+        let (ir, _warns) = build(&root).unwrap();
+        assert_eq!(ir.blocked_tiles.len(), 1);
+        let t = &ir.blocked_tiles[0];
+        assert!(matches!(t.kind, BlockedTileKind::PlayerStart));
+        assert_eq!((t.map_id, t.x, t.y), (1, 0, 0));
+
+        let _ = std::fs::remove_dir_all(root.as_std_path());
+    }
+
+    #[test]
+    fn blocked_tile_transfer_end_to_end_and_passable_start_control() {
+        use dk_doctor_core::ir::BlockedTileKind;
+        // Map001 (start map, passable start) has an event that transfers the player
+        // to map 2 tile (0,0), which is a wall → one Transfer blocked tile, and no
+        // StartInWall (the start tile is open).
+        let root = temp_root("blocked_transfer");
+        let data = root.join("data");
+        std::fs::create_dir_all(data.as_std_path()).unwrap();
+        std::fs::write(
+            data.join("System.json").as_std_path(),
+            br#"{"switches":["",""],"variables":["",""],"startMapId":1,"startX":0,"startY":0}"#,
+        )
+        .unwrap();
+        std::fs::write(
+            data.join("Tilesets.json").as_std_path(),
+            br#"[null,{"id":1,"name":"T","tilesetNames":[],"flags":[16,15]}]"#,
+        )
+        .unwrap();
+        // Map001: open ground (tile 0), a Direct transfer (201) to map 2 (0,0).
+        std::fs::write(
+            data.join("Map001.json").as_std_path(),
+            br#"{"width":1,"height":1,"tilesetId":1,"data":[0,0,0,0,0,0],"events":[null,{"id":1,"name":"Door","pages":[{"trigger":0,"list":[{"code":201,"indent":0,"parameters":[0,2,0,0,0,0]},{"code":0,"indent":0,"parameters":[]}]}]}]}"#,
+        )
+        .unwrap();
+        // Map002: a 1x1 wall.
+        std::fs::write(
+            data.join("Map002.json").as_std_path(),
+            br#"{"width":1,"height":1,"tilesetId":1,"data":[1,0,0,0,0,0],"events":[]}"#,
+        )
+        .unwrap();
+
+        let (ir, _warns) = build(&root).unwrap();
+        assert_eq!(
+            ir.blocked_tiles.len(),
+            1,
+            "only the transfer, not the start"
+        );
+        let t = &ir.blocked_tiles[0];
+        assert!(matches!(t.kind, BlockedTileKind::Transfer));
+        assert_eq!((t.map_id, t.x, t.y), (2, 0, 0));
+        assert_eq!(t.location.path.to_string(), "Map001/EV001/page1/cmd0");
 
         let _ = std::fs::remove_dir_all(root.as_std_path());
     }
