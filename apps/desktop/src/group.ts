@@ -348,7 +348,19 @@ export function rulesInReport(r: Report): string[] {
  * issue yields the same fingerprint on every run.
  */
 export function fingerprint(f: Finding): string {
-  return `${f.rule}${f.file}${f.path}${JSON.stringify(f.args)}`;
+  return `${f.rule}${f.file}${f.path}${JSON.stringify(identityArgs(f.args))}`;
+}
+
+/**
+ * Drops volatile per-finding counts (dead_variable.writes /
+ * uninitialized_symbol.reads) from the args used for the fingerprint identity, so
+ * an unrelated added/removed site does not make an unchanged finding look "new".
+ * Mirrors the Rust `Finding::fingerprint` normalization.
+ */
+function identityArgs(args: Finding["args"]): unknown {
+  if (args.key === "dead_variable") return { ...args, writes: 0 };
+  if (args.key === "uninitialized_symbol") return { ...args, reads: 0 };
+  return args;
 }
 
 /** Fingerprints of every finding in a report (index-aligned with `findings`). */

@@ -711,8 +711,13 @@ pub fn analyze_plugin(src: &str) -> PluginJsFacts {
             if t.get(m_idx + 1) == Some(&Tok::Eq) {
                 // `X.prototype.m = …` — an assignment.
                 assigned.push(method);
-            } else if i >= 3 && t[i - 3] == Tok::Eq {
-                // `IDENT = X.prototype.m` — saving the original (alias).
+            } else {
+                // Any occurrence of `X.prototype.m` that is NOT the direct target
+                // of `=` reads the original → an alias/save-site. Beyond the plain
+                // `IDENT = X.prototype.m` idiom this also covers the IIFE-wrapper
+                // form `X.prototype.m = (function(o){…})(X.prototype.m)` and
+                // `.call`/`.apply` chains, so a real alias is not misread as an
+                // overwrite (false plugin-conflict).
                 saved.insert(method);
             }
         }
@@ -784,6 +789,24 @@ mod tests {
             .find(|(m, _)| m == "Scene_Map.prototype.update")
             .unwrap();
         assert!(upd.1, "update без alias → перетирает");
+    }
+
+    #[test]
+    fn iife_wrapper_alias_is_not_an_overwrite() {
+        // The IIFE-argument idiom chains the original (passed as a call arg), so it
+        // must be classified as an alias, not a (false) overwrite conflict.
+        let src = r#"
+            Scene_Map.prototype.update = (function(o) {
+                return function() { o.call(this); };
+            })(Scene_Map.prototype.update);
+        "#;
+        let f = analyze_plugin(src);
+        let upd = f
+            .patches
+            .iter()
+            .find(|(m, _)| m == "Scene_Map.prototype.update")
+            .unwrap();
+        assert!(!upd.1, "IIFE-wrapper сохраняет оригинал → не перетирает");
     }
 
     #[test]

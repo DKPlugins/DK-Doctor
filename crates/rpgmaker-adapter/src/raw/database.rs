@@ -49,7 +49,8 @@ pub struct Actor {
     /// classId → Classes.
     #[serde(default, rename = "classId")]
     pub class_id: u32,
-    /// equips[] (slot 0 → Weapons, the rest → Armors; 0=empty).
+    /// equips[] (slot 0 → Weapons, slot 1 → Weapons when dual-wielding else
+    /// Armors, the rest → Armors; 0=empty). See [`crate::db_edges::actor`].
     #[serde(default)]
     pub equips: Vec<i64>,
     /// faceName (img/faces/).
