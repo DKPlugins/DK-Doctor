@@ -72,8 +72,17 @@ fn write_baseline_then_fail_on_new_passes() {
     assert_eq!(write, 0, "writing a baseline exits 0");
     assert!(baseline.as_std_path().exists(), "baseline file created");
 
-    let gate = run(&["--fail-on", "new", "--baseline", baseline.as_str(), &fixture()]);
-    assert_eq!(gate, 0, "no new findings vs the just-written baseline → pass");
+    let gate = run(&[
+        "--fail-on",
+        "new",
+        "--baseline",
+        baseline.as_str(),
+        &fixture(),
+    ]);
+    assert_eq!(
+        gate, 0,
+        "no new findings vs the just-written baseline → pass"
+    );
 
     let _ = std::fs::remove_file(baseline.as_std_path());
 }
@@ -106,11 +115,18 @@ fn config_suppress_removes_a_finding_by_fingerprint() {
 #[test]
 fn fail_on_new_without_baseline_treats_all_as_new() {
     // With no baseline file, every finding is "new" → the gate trips.
-    let missing = std::env::temp_dir().join(format!("dkbaseline_absent_{}.json", std::process::id()));
+    let missing =
+        std::env::temp_dir().join(format!("dkbaseline_absent_{}.json", std::process::id()));
     let missing = camino::Utf8PathBuf::from_path_buf(missing).unwrap();
     let _ = std::fs::remove_file(missing.as_std_path());
     assert_eq!(
-        run(&["--fail-on", "new", "--baseline", missing.as_str(), &fixture()]),
+        run(&[
+            "--fail-on",
+            "new",
+            "--baseline",
+            missing.as_str(),
+            &fixture()
+        ]),
         1
     );
 }
