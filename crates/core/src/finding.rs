@@ -33,19 +33,51 @@ impl Finding {
     /// (`rule` + `file` + breadcrumb `path` + the structured message `args`), so a
     /// CLI baseline and the app's run-diff agree on what "the same finding" is.
     /// The localized `message` text is deliberately excluded — switching
-    /// `--lang` must not make every finding look new. The engine output is
-    /// deterministic, so the same underlying issue yields the same fingerprint on
-    /// every run. Returned as a 16-char hex FNV-1a hash for compact baselines.
+    /// `--lang` must not make every finding look new. Volatile per-finding COUNTS
+    /// (`DeadVariable.writes` / `UninitializedSymbol.reads`) are normalized out too
+    /// (see [`fingerprint_args`]). The engine output is deterministic, so the same
+    /// underlying issue yields the same fingerprint on every run. Returned as a
+    /// 16-char hex FNV-1a hash for compact baselines.
     pub fn fingerprint(&self) -> String {
-        // `args` = the compact JSON of the typed message (tag "key" + fields),
-        // matching the desktop's `JSON.stringify(f.args)`.
-        let args = serde_json::to_string(&self.message).unwrap_or_default();
+        let args = fingerprint_args(&self.message);
         let identity = format!(
             "{}{}{}{}",
             self.rule, self.location.file, self.location.path, args
         );
         format!("{:016x}", fnv1a64(identity.as_bytes()))
     }
+}
+
+/// Serializes a message for the fingerprint, normalizing volatile per-finding
+/// COUNTS to a fixed value. `DeadVariable.writes` and `UninitializedSymbol.reads`
+/// are tallies of unrelated sites: adding a third write to an already-dead variable
+/// changes the count but not the underlying issue ("var #N written, never read").
+/// Keeping the count in the identity would break baselines and `[[suppress]]`
+/// entries on every such edit. The desktop's `group.ts` fingerprint applies the
+/// same normalization so the two identity schemes stay aligned.
+fn fingerprint_args(msg: &Msg) -> String {
+    let normalized = match msg {
+        Msg::DeadVariable { id, name, .. } => Msg::DeadVariable {
+            id: *id,
+            name: name.clone(),
+            writes: 0,
+        },
+        Msg::UninitializedSymbol {
+            kind,
+            id,
+            name,
+            plugin_checked,
+            ..
+        } => Msg::UninitializedSymbol {
+            kind: *kind,
+            id: *id,
+            name: name.clone(),
+            reads: 0,
+            plugin_checked: *plugin_checked,
+        },
+        other => other.clone(),
+    };
+    serde_json::to_string(&normalized).unwrap_or_default()
 }
 
 /// FNV-1a 64-bit hash — a small, dependency-free, stable string hash for
@@ -145,6 +177,29 @@ mod tests {
         assert_ne!(base.fingerprint(), other_rule.fingerprint());
         assert_ne!(base.fingerprint(), other_file.fingerprint());
         assert_ne!(base.fingerprint(), other_args.fingerprint());
+    }
+
+    #[test]
+    fn fingerprint_ignores_volatile_write_count() {
+        // Same dead variable, different number of (unrelated) write sites → same
+        // identity, so a baseline / [[suppress]] entry keeps matching when an extra
+        // write is added elsewhere.
+        let mut a = finding("dead-variables", "data/Map003.json", 7);
+        let mut b = finding("dead-variables", "data/Map003.json", 7);
+        a.message = Msg::DeadVariable {
+            id: 7,
+            name: None,
+            writes: 2,
+        };
+        b.message = Msg::DeadVariable {
+            id: 7,
+            name: None,
+            writes: 5,
+        };
+        assert_eq!(a.fingerprint(), b.fingerprint());
+        // But a different variable id is still a different finding.
+        let other = finding("dead-variables", "data/Map003.json", 8);
+        assert_ne!(a.fingerprint(), other.fingerprint());
     }
 
     #[test]

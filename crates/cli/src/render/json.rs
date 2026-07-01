@@ -5,7 +5,9 @@
 //! language-neutral structural data (`message_key` + `args`) and as a ready
 //! `message` string in the selected language.
 
-use dk_doctor_core::{Lang, Msg, Report, render as render_msg};
+use dk_doctor_core::{
+    Fix, Lang, Msg, Remediation, Report, autofix, remediation, render as render_msg,
+};
 use serde::Serialize;
 
 /// JSON report wrapper with stable field names.
@@ -40,6 +42,13 @@ struct Finding<'a> {
     /// Ready message string in the selected language.
     message: String,
     references: Vec<Reference<'a>>,
+    /// Remediation metadata (why it matters, how to fix, docs link) — computed
+    /// from the message; feeds the desktop bug-card / rule-explainer.
+    remediation: Remediation,
+    /// A safe, machine-applicable fix (only case-only asset renames today);
+    /// omitted when the finding has none.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    fix: Option<Fix>,
 }
 
 /// Related site in JSON form.
@@ -60,6 +69,7 @@ fn message_key(msg: &Msg) -> &'static str {
         Msg::UnreachableMap { .. } => "unreachable_map",
         Msg::DanglingDbRef { .. } => "dangling_db_ref",
         Msg::BrokenAsset { .. } => "broken_asset",
+        Msg::AssetCaseMismatch { .. } => "asset_case_mismatch",
         Msg::OrphanAsset { .. } => "orphan_asset",
         Msg::DeadCodeAfterExit { .. } => "dead_code_after_exit",
         Msg::DeadSelfSwitch { .. } => "dead_self_switch",
@@ -107,6 +117,8 @@ pub fn render(report: &Report, engine: &str, lang: Lang) -> String {
                     path: r.path.to_string(),
                 })
                 .collect(),
+            remediation: remediation(&f.message, lang),
+            fix: autofix(&f.message),
         })
         .collect();
 

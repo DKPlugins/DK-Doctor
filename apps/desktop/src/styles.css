@@ -2208,6 +2208,20 @@ svg {
 .dmsg .em {
   color: var(--text-secondary);
 }
+.dwhy {
+  font: var(--weight-regular) var(--mono-sm)/1.6 var(--font-mono);
+  color: var(--text-secondary);
+}
+.dfix {
+  font: var(--weight-medium) var(--mono-sm)/1.6 var(--font-mono);
+  color: var(--text);
+  padding: 11px 13px;
+  background: var(--surface-sunken);
+  border: 1px solid var(--border);
+  border-left: 3px solid var(--brand);
+  border-radius: var(--radius-sm);
+  word-break: break-word;
+}
 .dconf {
   display: inline-flex;
   align-items: center;

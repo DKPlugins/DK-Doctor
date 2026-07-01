@@ -69,12 +69,24 @@ fn emit_effect_edges(
     }
 }
 
-/// Actor: classId → Class; equips slot 0 → Weapon, slots ≥1 → Armor; traits.
+/// Actor: classId → Class; equips slot 0 → Weapon, slot 1 → Weapon when the actor
+/// dual-wields (else Armor), slots ≥2 → Armor; traits.
+///
+/// RPG Maker resolves an equip id against Weapons vs Armors by the slot's *etype*,
+/// not its index: normally only slot 0 is a weapon slot, but the Dual Wield trait
+/// (`code 61` = TRAIT_SLOT_TYPE, `dataId 1`) turns slot 1 into a second weapon
+/// slot, so `equips[1]` then holds a Weapon id. Mapping it positionally to Armor
+/// would raise a false dangling-Armor reference and skip the real weapon check.
+/// Only the actor's own traits are visible here (classes are parsed after actors),
+/// so a class-granted dual wield is not detected — a conservative miss, never a
+/// wrong-kind edge in the normal (non-dual-wield) case.
 pub fn actor(b: &mut IrBuilder, from: EntityId, loc: &Location, rec: &Actor) {
     db_edge(b, from, loc, DbKind::Class, rec.class_id as i64);
+    let dual_wield = rec.traits.iter().any(|t| t.code == 61 && t.data_id == 1);
     for (slot, &eq) in rec.equips.iter().enumerate() {
-        // 0 = empty slot, skip; slot 0 → weapon, the rest → armor.
-        let kind = if slot == 0 {
+        // 0 = empty slot, skipped by db_edge; slot 0 (and slot 1 when dual-wielding)
+        // → weapon, the rest → armor.
+        let kind = if slot == 0 || (dual_wield && slot == 1) {
             DbKind::Weapon
         } else {
             DbKind::Armor
@@ -141,4 +153,76 @@ pub fn enemy(b: &mut IrBuilder, from: EntityId, loc: &Location, rec: &Enemy) {
         }
     }
     emit_trait_edges(b, from, loc, &rec.traits);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::raw::database::Actor;
+    use dk_doctor_core::ir::{DatabaseRecord, Engine, Entity, Ir};
+
+    fn actor_rec(equips: Vec<i64>, traits: Vec<Trait>) -> Actor {
+        Actor {
+            id: 1,
+            name: String::new(),
+            class_id: 0,
+            equips,
+            face_name: String::new(),
+            character_name: String::new(),
+            battler_name: String::new(),
+            traits,
+        }
+    }
+
+    /// Weapon/Armor equip edges emitted for one actor record.
+    fn equip_edges(rec: &Actor) -> Vec<(DbKind, u32)> {
+        let mut b = Ir::builder(Engine::Mz);
+        let loc = Location::file_only("data/Actors.json");
+        let e = b.push_entity(
+            Entity::DatabaseRecord(DatabaseRecord {
+                kind: DbKind::Actor,
+                record_id: 1,
+                name: String::new(),
+            }),
+            loc.clone(),
+        );
+        actor(&mut b, e, &loc, rec);
+        b.finish()
+            .edges
+            .iter()
+            .filter_map(|r| match r.edge {
+                Edge::ReferencesDbId { kind, id }
+                    if matches!(kind, DbKind::Weapon | DbKind::Armor) =>
+                {
+                    Some((kind, id))
+                }
+                _ => None,
+            })
+            .collect()
+    }
+
+    #[test]
+    fn slot_one_is_armor_normally_but_weapon_when_dual_wielding() {
+        // Normal actor: slot 0 = weapon #1, slot 1 = shield/armor #2.
+        let normal = equip_edges(&actor_rec(vec![1, 2, 0, 0, 0], vec![]));
+        assert!(normal.contains(&(DbKind::Weapon, 1)));
+        assert!(normal.contains(&(DbKind::Armor, 2)));
+        assert!(!normal.contains(&(DbKind::Weapon, 2)));
+
+        // Dual Wield (trait code 61, dataId 1): slot 1 holds an off-hand weapon,
+        // so #2 must be checked against Weapons, not Armors.
+        let dual = equip_edges(&actor_rec(
+            vec![1, 2, 0, 0, 0],
+            vec![Trait {
+                code: 61,
+                data_id: 1,
+            }],
+        ));
+        assert!(dual.contains(&(DbKind::Weapon, 1)));
+        assert!(
+            dual.contains(&(DbKind::Weapon, 2)),
+            "off-hand weapon must be a Weapon reference"
+        );
+        assert!(!dual.contains(&(DbKind::Armor, 2)));
+    }
 }

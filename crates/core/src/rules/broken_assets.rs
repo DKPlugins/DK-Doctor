@@ -5,13 +5,36 @@
 //! asset reference. The image/sound will fail to load.
 
 use crate::finding::{Category, Confidence, Finding, Severity};
-use crate::ir::{AssetKind, DbKind, Edge, Entity, Ir, Location, PathSeg};
+use crate::ir::{AssetKey, AssetKind, DbKind, Edge, Entity, Ir, Location, PathSeg};
 use crate::message::Msg;
 use crate::rules::{Rule, RuleCtx};
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 
 /// Rule that finds references to missing assets.
 pub struct BrokenAssets;
+
+/// Case-insensitive index of on-disk assets: `(kind, lowercased name)` → the
+/// actual on-disk name (correct case). Lets a "missing" reference recover the
+/// file that exists under a different letter case → a `case-mismatch` finding
+/// (a portability bug) instead of a scarier `broken-asset` error. On a collision
+/// (two files differing only in case) the lexicographically smallest name wins,
+/// so the result is deterministic.
+fn case_insensitive_index<S: std::hash::BuildHasher>(
+    present: &HashSet<AssetKey, S>,
+) -> HashMap<(AssetKind, String), &str> {
+    let mut idx: HashMap<(AssetKind, String), &str> = HashMap::new();
+    for key in present {
+        let ci = (key.kind, key.name.to_ascii_lowercase());
+        idx.entry(ci)
+            .and_modify(|cur| {
+                if key.name.as_str() < *cur {
+                    *cur = key.name.as_str();
+                }
+            })
+            .or_insert(key.name.as_str());
+    }
+    idx
+}
 
 /// Kinds for which broken-assets is deferred until Layer-A / usage-gating.
 ///
@@ -90,6 +113,7 @@ impl Rule for BrokenAssets {
 
     fn run(&self, ctx: &RuleCtx<'_>) -> Vec<Finding> {
         let used_tilesets = used_tileset_ids(ctx.ir);
+        let ci_index = case_insensitive_index(&ctx.ir.assets_present);
         let mut findings = Vec::new();
         for (key, location) in &ctx.ir.asset_refs {
             if is_deferred_kind(key.kind) {
@@ -107,6 +131,27 @@ impl Rule for BrokenAssets {
             // An asset declared by a plugin (`@type file`): its loading is
             // handled by the plugin (possibly from a non-standard folder) — not broken.
             if ctx.ir.plugin_provided_assets.contains(key) {
+                continue;
+            }
+            // The file is absent under the referenced name — but it may exist under
+            // a different letter case. That loads on case-insensitive filesystems
+            // (Windows/macOS) yet fails on case-sensitive ones (Linux servers, web
+            // builds): a portability bug (warning) with a safe case-only fix, not a
+            // hard "will not load" error.
+            if let Some(&on_disk) = ci_index.get(&(key.kind, key.name.to_ascii_lowercase())) {
+                findings.push(Finding {
+                    severity: Severity::Warning,
+                    category: Category::Asset,
+                    confidence: Confidence::Certain,
+                    location: location.clone(),
+                    message: Msg::AssetCaseMismatch {
+                        folder: key.kind.folder().to_string(),
+                        referenced: key.name.clone(),
+                        on_disk: on_disk.to_string(),
+                    },
+                    references: Vec::new(),
+                    rule: "broken-assets",
+                });
                 continue;
             }
             findings.push(Finding {
@@ -213,6 +258,45 @@ mod tests {
             Msg::BrokenAsset { folder, name }
                 if folder == "img/pictures" && name == "Ghost"
         ));
+    }
+
+    #[test]
+    fn case_only_difference_is_a_warning_not_an_error() {
+        let mut b = Ir::builder(Engine::Mz);
+        // On disk the file is lower-case "hero"; the data references "Hero".
+        b.add_asset_present(AssetKey::new(AssetKind::Picture, "hero"));
+        b.add_asset_ref(
+            AssetKey::new(AssetKind::Picture, "Hero"),
+            Location::file_only("data/Map001.json"),
+        );
+        // A genuinely absent file stays a broken-asset error (control).
+        b.add_asset_ref(
+            AssetKey::new(AssetKind::Picture, "Ghost"),
+            Location::file_only("data/Map001.json"),
+        );
+        let ir = b.finish();
+        let f = BrokenAssets.run(&RuleCtx::new(&ir));
+        assert_eq!(f.len(), 2);
+
+        let case = f
+            .iter()
+            .find(|x| matches!(&x.message, Msg::AssetCaseMismatch { .. }))
+            .expect("case-mismatch emitted");
+        assert_eq!(case.severity, Severity::Warning);
+        assert!(matches!(
+            &case.message,
+            Msg::AssetCaseMismatch { referenced, on_disk, .. }
+                if referenced == "Hero" && on_disk == "hero"
+        ));
+        // The safe autofix aligns the reference to the on-disk case.
+        let fix = crate::remediation::autofix(&case.message).expect("case-mismatch has an autofix");
+        assert_eq!((fix.from.as_str(), fix.to.as_str()), ("Hero", "hero"));
+
+        let broken = f
+            .iter()
+            .find(|x| matches!(&x.message, Msg::BrokenAsset { .. }))
+            .expect("broken-asset emitted");
+        assert_eq!(broken.severity, Severity::Error);
     }
 
     #[test]

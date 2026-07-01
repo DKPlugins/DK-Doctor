@@ -20,12 +20,12 @@
 //!
 //! A file that cannot be read/parsed is skipped with a warning.
 
-use crate::plugins::annotations::{self, InferredKind, ParamType};
+use crate::plugins::annotations::{self, InferredKind, ParamSchema, ParamType};
 use crate::plugins::js;
 use crate::raw::plugins::PluginEntry;
 use camino::Utf8Path;
 use dk_doctor_core::ir::{
-    AssetKey, AssetKind, Edge, Entity, EntityId, IrBuilder, Location, MethodPatch, PathSeg,
+    AssetKey, AssetKind, DbKind, Edge, Entity, EntityId, IrBuilder, Location, MethodPatch, PathSeg,
     PluginCommand, PluginMeta, PluginOrderDeps, PluginRef,
 };
 
@@ -134,6 +134,64 @@ fn asset_name(value: &str) -> String {
     }
 }
 
+/// Decodes a `@type struct<…>` value into its JSON objects.
+///
+/// Scalar: `'{"switchId":"5"}'` → one object. Array: the double-encoded
+/// `'["{…}","{…}"]'` form (each element is itself a JSON object string).
+/// Tolerant — anything that does not parse yields no objects (this path only
+/// suppresses false positives, so a miss costs at most a lost diagnostic).
+fn decode_struct_objects(
+    value: &str,
+    is_array: bool,
+) -> Vec<serde_json::Map<String, serde_json::Value>> {
+    let mut out = Vec::new();
+    if is_array {
+        if let Ok(arr) = serde_json::from_str::<Vec<String>>(value) {
+            for s in arr {
+                if let Ok(serde_json::Value::Object(m)) = serde_json::from_str(&s) {
+                    out.push(m);
+                }
+            }
+        }
+    } else if let Ok(serde_json::Value::Object(m)) = serde_json::from_str(value) {
+        out.push(m);
+    }
+    out
+}
+
+/// Marks the switch/variable/common-event fields of one decoded struct object as
+/// plugin-managed (suppression-only, like the top-level params): a typed
+/// `@type switch/variable/common_event` field, or an untyped `…Switch`/`…Variable`/
+/// `…Common Event`-named one, contributes its id(s). Db/file/nested-struct fields
+/// are intentionally skipped — emitting findings from struct fields is the
+/// false-positive minefield we avoid.
+fn mark_struct_symbol_fields(
+    b: &mut IrBuilder,
+    fields: &[ParamSchema],
+    obj: &serde_json::Map<String, serde_json::Value>,
+) {
+    for field in fields {
+        let kind = match field.ty {
+            ParamType::Switch => Some(InferredKind::Switch),
+            ParamType::Variable => Some(InferredKind::Variable),
+            ParamType::Db(DbKind::CommonEvent) => Some(InferredKind::CommonEvent),
+            _ if !field.has_explicit_type => annotations::infer_symbol_from_name(&field.name),
+            _ => None,
+        };
+        let Some(kind) = kind else { continue };
+        let Some(fval) = obj.get(&field.name).and_then(|v| v.as_str()) else {
+            continue;
+        };
+        for id in decode_ids(fval, field.is_array) {
+            match kind {
+                InferredKind::Switch => b.symbols_mut().mark_switch_declared_by_plugin(id),
+                InferredKind::Variable => b.symbols_mut().mark_variable_declared_by_plugin(id),
+                InferredKind::CommonEvent => b.add_reserved_common_event(id),
+            }
+        }
+    }
+}
+
 /// Collects Tier-A facts of all enabled plugins into the IR.
 ///
 /// `plugins` — entries from `plugins.js` (in load order). `plugins_dir` — the
@@ -226,6 +284,23 @@ pub fn collect(
                         );
                         for id in ids {
                             b.push_edge(from, Edge::ReferencesDbId { kind, id }, ref_loc.clone());
+                        }
+                    }
+                }
+                ParamType::Struct => {
+                    // `@type struct<Name>` (or `[]`): the value is a JSON object
+                    // (or array of them) following the `/*~struct~Name:*/` schema.
+                    // We recover ONLY the switch/variable/common-event fields, and
+                    // ONLY to suppress false positives (mark them plugin-managed) —
+                    // exactly the safety profile of the untyped name inference. We
+                    // never emit a finding from a struct field: decoding VisuMZ-style
+                    // nested structs is brittle, and a wrong guess there would be a
+                    // false alarm rather than a merely missed diagnostic.
+                    if let Some(sname) = &param.struct_name
+                        && let Some(fields) = ann.structs.get(sname)
+                    {
+                        for obj in decode_struct_objects(value, param.is_array) {
+                            mark_struct_symbol_fields(b, fields, &obj);
                         }
                     }
                 }
@@ -596,6 +671,69 @@ mod tests {
                 .iter()
                 .any(|r| matches!(r.edge, Edge::ReferencesDbId { .. })),
             "инференция не эмитит referential-integrity"
+        );
+
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    fn collect_suppresses_symbols_inside_struct_params() {
+        // A struct<Template>[] and a scalar struct<Template>: their switch /
+        // common_event / (name-inferred) variable fields are marked plugin-managed
+        // — suppression only, with NO referential-integrity edges emitted.
+        let tmp = std::env::temp_dir().join(format!("dkpluginstruct{}", std::process::id()));
+        let _ = std::fs::create_dir_all(&tmp);
+        let src = r#"/*:
+ * @param Templates
+ * @type struct<Template>[]
+ * @param One
+ * @type struct<Template>
+ */
+/*~struct~Template:
+ * @param Gate Switch
+ * @type switch
+ * @param OnStart
+ * @type common_event
+ * @param Extra Variable
+ */"#;
+        std::fs::write(tmp.join("Struct.js"), src).unwrap();
+
+        let entry = PluginEntry {
+            name: "Struct".to_string(),
+            status: true,
+            description: String::new(),
+            parameters: params(&[
+                // Double-encoded array of struct objects.
+                (
+                    "Templates",
+                    r#"["{\"Gate Switch\":\"12\",\"OnStart\":\"7\",\"Extra Variable\":\"4\"}","{\"Gate Switch\":\"13\"}"]"#,
+                ),
+                // Scalar struct object.
+                ("One", r#"{"Gate Switch":"20"}"#),
+            ]),
+        };
+
+        let mut b = Ir::builder(Engine::Mz);
+        let mut warns = Vec::new();
+        let dir = camino::Utf8PathBuf::from_path_buf(tmp.clone()).unwrap();
+        let pjs = camino::Utf8Path::new("js/plugins.js");
+        collect(&mut b, &[entry], &dir, pjs, &mut warns);
+        let ir = b.finish();
+
+        // Typed switch fields across the array + scalar object.
+        assert!(ir.symbols.switches.get(&12).unwrap().declared_by_plugin);
+        assert!(ir.symbols.switches.get(&13).unwrap().declared_by_plugin);
+        assert!(ir.symbols.switches.get(&20).unwrap().declared_by_plugin);
+        // Typed common_event field → reserved (rescues dead-common-event).
+        assert!(ir.reserved_common_events.contains(&7));
+        // Untyped "Extra Variable" field → name-inferred variable → declared.
+        assert!(ir.symbols.variables.get(&4).unwrap().declared_by_plugin);
+        // Suppression only: struct fields emit no referential-integrity edges.
+        assert!(
+            !ir.edges
+                .iter()
+                .any(|r| matches!(r.edge, Edge::ReferencesDbId { .. })),
+            "struct fields must not emit findings"
         );
 
         let _ = std::fs::remove_dir_all(&tmp);

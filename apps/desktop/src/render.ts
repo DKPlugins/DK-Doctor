@@ -1177,6 +1177,15 @@ export function drawerHTML(s: State): string {
   let body = '<div class="drawer__body">';
   body += `<div class="dsec"><span class="dsec__t">${esc(t(lang, "dLocation"))}</span><div class="dcrumb">${crumbInline(f.file, f.path)}</div></div>`;
   body += `<div class="dsec"><span class="dsec__t">${esc(t(lang, "dDiagnosis"))}</span><div class="dmsg">${styleMessage(f.message)}</div></div>`;
+  // Remediation (PR-11): why it matters + how to fix. Optional — older cached
+  // snapshots may not carry it.
+  const rem = f.remediation;
+  if (rem?.why) {
+    body += `<div class="dsec"><span class="dsec__t">${esc(t(lang, "dWhy"))}</span><div class="dwhy">${esc(rem.why)}</div></div>`;
+  }
+  if (rem?.suggested_fix) {
+    body += `<div class="dsec"><span class="dsec__t">${esc(t(lang, "dFix"))}</span><div class="dfix">${esc(rem.suggested_fix)}</div></div>`;
+  }
   // Filled asynchronously with the event's command list (see loadDrawerContext).
   body += '<div id="drawerContext"></div>';
   body += `<div class="dsec">${confLine(s, f.confidence)}</div>`;
@@ -1191,9 +1200,13 @@ export function drawerHTML(s: State): string {
   }
   body += "</div>";
 
+  const docsBtn = rem?.docs_url
+    ? `<button class="btn btn--secondary btn--md" data-act="open-docs" data-doc="${esc(rem.docs_url)}">${icon("file-text")} ${esc(t(lang, "dDocs"))}</button>`
+    : "";
   const foot =
     '<div class="drawer__foot">' +
     `<button class="btn btn--secondary btn--md" data-act="copy">${icon("copy")} ${esc(t(lang, "copyPath"))}</button>` +
+    docsBtn +
     '<span class="grow"></span>' +
     `<button class="iconbtn" data-act="ignore" title="${esc(t(lang, "ignore"))}" aria-label="${esc(t(lang, "ignore"))}">${icon("eye-off")}</button></div>`;
 

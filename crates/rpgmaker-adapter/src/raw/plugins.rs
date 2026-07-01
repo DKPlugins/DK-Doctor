@@ -62,8 +62,17 @@ pub fn parse(text: &str) -> Vec<PluginEntry> {
     let Some(array) = extract_array(text) else {
         return Vec::new();
     };
-    let parsed: Vec<PluginEntry> = serde_json::from_str(array).unwrap_or_default();
-    parsed.into_iter().filter(|p| !is_separator(p)).collect()
+    // Parse each entry independently (mirroring `database::parse_table`): decode the
+    // outer array into raw JSON slots, then deserialize each entry on its own. A
+    // single malformed entry (e.g. `"parameters": null` from a hand-edited file or
+    // a third-party plugin manager) is skipped instead of dropping EVERY plugin and
+    // silently blinding all plugin-dependent rules.
+    let slots: Vec<serde_json::Value> = serde_json::from_str(array).unwrap_or_default();
+    slots
+        .into_iter()
+        .filter_map(|v| serde_json::from_value::<PluginEntry>(v).ok())
+        .filter(|p| !is_separator(p))
+        .collect()
 }
 
 /// A separator entry (`name` empty or made of dashes/spaces).
@@ -189,6 +198,30 @@ var $plugins =
         assert_eq!(
             plugins[1].parameters.get("bustsFolder").map(String::as_str),
             Some("img/pictures/busts/")
+        );
+    }
+
+    #[test]
+    fn one_malformed_entry_does_not_drop_the_rest() {
+        // A wrong-typed field (`parameters: null`, `status: 1`) makes that single
+        // entry fail to deserialize — but the surrounding valid plugins must survive
+        // (per-entry parse), instead of the whole array collapsing to empty.
+        let text = r#"var $plugins =
+[
+{"name":"Good1","status":true,"description":"","parameters":{}},
+{"name":"BadParams","status":true,"description":"","parameters":null},
+{"name":"BadStatus","status":1,"description":"","parameters":{}},
+{"name":"Good2","status":true,"description":"","parameters":{"k":"v"}}
+];
+"#;
+        let plugins = parse(text);
+        let names: Vec<&str> = plugins.iter().map(|p| p.name.as_str()).collect();
+        assert!(names.contains(&"Good1"), "valid entry before the bad ones");
+        assert!(names.contains(&"Good2"), "valid entry after the bad ones");
+        assert_eq!(
+            plugins.len(),
+            2,
+            "only the two malformed entries are dropped"
         );
     }
 

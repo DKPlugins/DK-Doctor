@@ -1046,6 +1046,9 @@ document.addEventListener("click", (e) => {
       case "ignore":
         drawerAction(act);
         break;
+      case "open-docs":
+        if (actEl.dataset.doc) void openRelease(actEl.dataset.doc);
+        break;
       case "clear-recent":
         clearRecentList();
         break;
