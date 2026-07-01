@@ -1,16 +1,21 @@
 //! `dk-doctor` — CLI binary of the RPG Maker MV/MZ project analyzer.
 //!
-//! Flow: argument parsing → [`load_project`] → running the rules
-//! [`Registry`] → assembling the [`Report`] → rendering (console/JSON) → exit code
-//! (`0` clean / `1` has warnings / `2` has errors).
+//! Flow: argument parsing → config (`.dk-doctor.toml`) merge → [`load_project`] →
+//! running the rules [`Registry`] → suppressions → assembling the [`Report`] →
+//! rendering (console/JSON) → exit code. The exit code is either the legacy
+//! severity mapping (`0` clean / `1` warnings / `2` errors) or, with `--fail-on`,
+//! a CI gate (`1` when the gate trips, else `0`).
 
 mod args;
+mod config;
 mod render;
 
 use args::{Args, Format, resolve_lang};
 use clap::Parser;
+use config::{FailOn, FileConfig};
 use dk_doctor_core::{Chrome, Engine, Registry, Report, RuleCtx, Severity, render_chrome};
 use dk_doctor_rpgmaker::load_project_with_warnings;
+use std::collections::HashSet;
 use std::process::ExitCode;
 
 /// RPG Maker "Exit Event Processing" command code (115). Passed to the
@@ -18,10 +23,10 @@ use std::process::ExitCode;
 /// not know the semantics of the code.
 const EXIT_COMMAND_CODES: &[u16] = &[115];
 
-/// Codes of "untraceable exit" commands for `stuck-autorun`: common event
-/// call (117), MV/MZ plugin commands (356/357) and an arbitrary script (355).
-/// A page with such a command may exit through a mechanism outside the static analysis — we don't flag it.
-const OPAQUE_EXIT_CODES: &[u16] = &[117, 355, 356, 357];
+/// Codes of "untraceable exit" commands for `stuck-autorun`: an arbitrary script
+/// (355) and MV/MZ plugin commands (356/357). A common event call (117) is
+/// handled interprocedurally by the rule via the per-common-event summary.
+const OPAQUE_EXIT_CODES: &[u16] = &[355, 356, 357];
 
 /// RPG Maker "Label" command code (118) — the target of "Jump to Label" (119).
 /// Passed to `dead-code-after-exit` so that code after a label is not marked dead
@@ -33,15 +38,51 @@ const LABEL_COMMAND_CODES: &[u16] = &[118];
 /// `dead-code-after-exit` so a trailing terminator after an exit is not marked dead.
 const NOOP_COMMAND_CODES: &[u16] = &[0];
 
+/// Effective settings after merging the CLI flags over the config file.
+struct Effective {
+    enable: Vec<String>,
+    disable: Vec<String>,
+    orphans: bool,
+    dead_common_events: bool,
+    min_severity: Option<Severity>,
+    fail_on: Option<FailOn>,
+    suppressed: HashSet<String>,
+}
+
 fn main() -> ExitCode {
     let args = Args::parse();
     let lang = resolve_lang(args.lang);
 
-    // Validate --enable/--disable ids against the real rule set. A typo would
-    // otherwise silently match no rule: with --enable it disables the whole
-    // analysis and prints a misleading "No problems found" with exit 0.
+    // Load the project config (explicit --config, else <project>/.dk-doctor.toml).
+    let (cfg_path, explicit) = match &args.config {
+        Some(p) => (p.clone(), true),
+        None => (args.project.join(".dk-doctor.toml"), false),
+    };
+    let cfg = match FileConfig::load(&cfg_path) {
+        Ok(Some(c)) => c,
+        Ok(None) if explicit => {
+            eprintln!("dk-doctor: config not found: {cfg_path}");
+            return ExitCode::from(2);
+        }
+        Ok(None) => FileConfig::default(),
+        Err(e) => {
+            eprintln!("dk-doctor: config error: {e}");
+            return ExitCode::from(2);
+        }
+    };
+
+    let eff = match resolve_effective(&args, &cfg) {
+        Ok(e) => e,
+        Err(e) => {
+            eprintln!("dk-doctor: {e}");
+            return ExitCode::from(2);
+        }
+    };
+
+    // Validate --enable/--disable ids (merged with the config) against the real
+    // rule set. A typo would otherwise silently match no rule.
     let known: Vec<&'static str> = builtin_rules().iter().map(|r| r.id()).collect();
-    for id in args.enable.iter().chain(args.disable.iter()) {
+    for id in eff.enable.iter().chain(eff.disable.iter()) {
         if !known.contains(&id.as_str()) {
             eprintln!(
                 "dk-doctor: unknown rule id '{id}'. Known rules: {}",
@@ -65,8 +106,8 @@ fn main() -> ExitCode {
 
     let engine = engine_label(ir.engine);
 
-    // Rule registry accounting for --enable/--disable and opt-in --orphans.
-    let registry = build_registry(&args);
+    // Rule registry accounting for enable/disable and opt-in rules.
+    let registry = build_registry(&eff);
     let orphans_active = registry.rule_ids().any(|id| id == "orphan-assets");
     let dead_ce_active = registry.rule_ids().any(|id| id == "dead-common-event");
 
@@ -79,68 +120,176 @@ fn main() -> ExitCode {
     .with_noop_codes(NOOP_COMMAND_CODES);
     let findings = registry.run_all(&ctx);
 
-    // Exit code reflects the real project state (all findings), independent of
-    // the display filter below — `--min-severity` must not mask warnings/errors
-    // that actually exist (that would make CI silently pass).
+    // Suppressions ([[suppress]] in the config) drop acknowledged findings before
+    // anything else — they must not count toward the summary, the gate or output.
+    let (findings, suppressed_count) = config::apply_suppressions(findings, &eff.suppressed);
+
+    // --write-baseline: snapshot the current fingerprints and exit (no gating).
+    if let Some(path) = &args.write_baseline {
+        match config::write_baseline(path, &findings) {
+            Ok(count) => {
+                eprintln!(
+                    "dk-doctor: {}",
+                    render_chrome(&Chrome::BaselineWritten { count }, lang)
+                );
+                return ExitCode::SUCCESS;
+            }
+            Err(e) => {
+                eprintln!("dk-doctor: {e}");
+                return ExitCode::from(2);
+            }
+        }
+    }
+
+    // Full report (true summary) — the display filter below never masks it.
     let report = Report::new(findings);
-    let exit = exit_code(&report);
+
+    // Exit code: the CI gate if --fail-on/config set it, otherwise the legacy
+    // severity mapping (2 errors / 1 warnings / 0).
+    let baseline_set = if eff.fail_on == Some(FailOn::New) {
+        match resolve_baseline(&args, &cfg) {
+            Ok(set) => set,
+            Err(e) => {
+                eprintln!("dk-doctor: {e}");
+                return ExitCode::from(2);
+            }
+        }
+    } else {
+        HashSet::new()
+    };
+    let (exit, new_count) = match eff.fail_on {
+        Some(mode) => {
+            let tripped = mode.triggered(&report, &baseline_set);
+            let new = (mode == FailOn::New).then(|| mode.offending_count(&report, &baseline_set));
+            (if tripped { 1u8 } else { 0u8 }, new)
+        }
+        None => (report.exit_code() as u8, None),
+    };
 
     // Display filter: drop findings below the requested minimum from the output
     // only. Applied to a clone so the report above keeps the true summary.
     let mut shown = report.findings.clone();
-    if let Some(min) = args.min_severity.map(Severity::from) {
+    if let Some(min) = eff.min_severity {
         shown.retain(|f| f.severity >= min);
     }
-    let report = Report::new(shown);
+    let shown_report = Report::new(shown);
 
     match args.format {
         Format::Console => {
-            render::console::render_report(&report, engine, lang);
+            render::console::render_report(&shown_report, engine, lang);
             if !orphans_active {
                 render::console::print_orphans_hint(lang);
             }
             if !dead_ce_active {
                 render::console::print_dead_common_events_hint(lang);
             }
+            if suppressed_count > 0 {
+                eprintln!(
+                    "{}",
+                    render_chrome(
+                        &Chrome::SuppressedNote {
+                            count: suppressed_count
+                        },
+                        lang
+                    )
+                );
+            }
+            if let Some(count) = new_count {
+                eprintln!(
+                    "{}",
+                    render_chrome(&Chrome::NewFindingsNote { count }, lang)
+                );
+            }
             // Surface skipped (unparseable) files so the report isn't silently partial.
             render::console::print_parse_warnings(&load_warnings, lang);
         }
         Format::Json => {
             use std::io::Write;
-            let json = render::json::render(&report, engine, lang);
+            let json = render::json::render(&shown_report, engine, lang);
             // Print JSON directly to stdout without coloring.
             let _ = writeln!(std::io::stdout(), "{json}");
         }
     }
 
-    exit
+    ExitCode::from(exit)
 }
 
-/// Assembles the rule registry, applying `--enable`/`--disable` by id.
+/// Merges the CLI flags over the config file into the effective settings. CLI
+/// flags always win; a config value fills a gap the flag left. Invalid config
+/// strings (`min_severity`/`fail_on`) are a hard error.
+fn resolve_effective(args: &Args, cfg: &FileConfig) -> Result<Effective, String> {
+    // enable/disable: the CLI list wins if non-empty, else the config list.
+    let take = |cli: &[String], file: &[String]| -> Vec<String> {
+        if cli.is_empty() {
+            file.to_vec()
+        } else {
+            cli.to_vec()
+        }
+    };
+    let min_severity = match args.min_severity {
+        Some(s) => Some(Severity::from(s)),
+        None => match &cfg.min_severity {
+            Some(s) => Some(
+                config::parse_min_severity(s)
+                    .ok_or_else(|| format!("config: invalid min_severity '{s}'"))?,
+            ),
+            None => None,
+        },
+    };
+    let fail_on = match args.fail_on {
+        Some(a) => Some(FailOn::from(a)),
+        None => match &cfg.fail_on {
+            Some(s) => {
+                Some(FailOn::parse(s).ok_or_else(|| format!("config: invalid fail_on '{s}'"))?)
+            }
+            None => None,
+        },
+    };
+    Ok(Effective {
+        enable: take(&args.enable, &cfg.enable),
+        disable: take(&args.disable, &cfg.disable),
+        orphans: args.orphans || cfg.orphans,
+        dead_common_events: args.dead_common_events || cfg.dead_common_events,
+        min_severity,
+        fail_on,
+        suppressed: cfg.suppressed_fingerprints(),
+    })
+}
+
+/// Resolves the baseline set for `--fail-on new`: `--baseline`, else the config
+/// `baseline` (relative to the project root), else empty.
+fn resolve_baseline(args: &Args, cfg: &FileConfig) -> Result<HashSet<String>, String> {
+    let path = args
+        .baseline
+        .clone()
+        .or_else(|| cfg.baseline.as_ref().map(|b| args.project.join(b)));
+    match path {
+        Some(p) => config::read_baseline(&p),
+        None => Ok(HashSet::new()),
+    }
+}
+
+/// Assembles the rule registry, applying enable/disable by id.
 ///
-/// If `--enable` is given, only the listed rules remain; otherwise all built-in
-/// rules are taken, then `--disable` is subtracted from them.
-fn build_registry(args: &Args) -> Registry {
+/// If `enable` is non-empty, only the listed rules remain; otherwise all built-in
+/// rules are taken, then `disable` is subtracted. `orphan-assets`/`dead-common-event`
+/// stay opt-in unless enabled via their flag/config or an explicit `enable`.
+fn build_registry(eff: &Effective) -> Registry {
     let mut registry = Registry::empty();
     for rule in builtin_rules() {
         let id = rule.id();
-        // --disable always wins.
-        if args.disable.iter().any(|d| d == id) {
+        // disable always wins.
+        if eff.disable.iter().any(|d| d == id) {
             continue;
         }
         let active = if id == "orphan-assets" {
-            // opt-in: only with --orphans or an explicit --enable orphan-assets
-            // (noisy on stock RTP, the list is incomplete without parsing plugins).
-            args.orphans || args.enable.iter().any(|e| e == id)
+            eff.orphans || eff.enable.iter().any(|e| e == id)
         } else if id == "dead-common-event" {
-            // opt-in: only with --dead-common-events or an explicit --enable
-            // (plugins reserve CEs via $gameTemp.reserveCommonEvent — on
-            // plugin-heavy projects almost all findings are false).
-            args.dead_common_events || args.enable.iter().any(|e| e == id)
-        } else if args.enable.is_empty() {
+            eff.dead_common_events || eff.enable.iter().any(|e| e == id)
+        } else if eff.enable.is_empty() {
             true
         } else {
-            args.enable.iter().any(|e| e == id)
+            eff.enable.iter().any(|e| e == id)
         };
         if active {
             registry.register(rule);
@@ -184,21 +333,20 @@ fn engine_label(engine: Engine) -> &'static str {
     }
 }
 
-/// Exit code based on the report (extracted for consistency with the stdout/stderr paths).
-fn exit_code(report: &Report) -> ExitCode {
-    ExitCode::from(report.exit_code() as u8)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
     use clap::Parser;
 
-    fn ids(args: &[&str]) -> Vec<String> {
+    fn effective(args: &[&str]) -> Effective {
         let mut full = vec!["dk-doctor"];
         full.extend_from_slice(args);
         let parsed = Args::parse_from(full);
-        build_registry(&parsed)
+        resolve_effective(&parsed, &FileConfig::default()).unwrap()
+    }
+
+    fn ids(args: &[&str]) -> Vec<String> {
+        build_registry(&effective(args))
             .rule_ids()
             .map(|s| s.to_string())
             .collect()
@@ -228,5 +376,36 @@ mod tests {
     fn explicit_enable_overrides_opt_in_default() {
         let active = ids(&[".", "--enable", "dead-common-event"]);
         assert!(active.iter().any(|id| id == "dead-common-event"));
+    }
+
+    #[test]
+    fn config_enables_opt_in_and_sets_fail_on() {
+        // A config that turns on orphans + dead-common-events and sets fail_on.
+        let cfg: FileConfig =
+            toml::from_str("orphans = true\ndead_common_events = true\nfail_on = \"warning\"\n")
+                .unwrap();
+        let parsed = Args::parse_from(["dk-doctor", "."]);
+        let eff = resolve_effective(&parsed, &cfg).unwrap();
+        assert!(eff.orphans);
+        assert!(eff.dead_common_events);
+        assert_eq!(eff.fail_on, Some(FailOn::Warning));
+        let active: Vec<String> = build_registry(&eff).rule_ids().map(String::from).collect();
+        assert!(active.iter().any(|id| id == "orphan-assets"));
+        assert!(active.iter().any(|id| id == "dead-common-event"));
+    }
+
+    #[test]
+    fn cli_flag_overrides_config_fail_on() {
+        let cfg: FileConfig = toml::from_str("fail_on = \"warning\"\n").unwrap();
+        let parsed = Args::parse_from(["dk-doctor", ".", "--fail-on", "error"]);
+        let eff = resolve_effective(&parsed, &cfg).unwrap();
+        assert_eq!(eff.fail_on, Some(FailOn::Error));
+    }
+
+    #[test]
+    fn invalid_config_fail_on_is_an_error() {
+        let cfg: FileConfig = toml::from_str("fail_on = \"sometimes\"\n").unwrap();
+        let parsed = Args::parse_from(["dk-doctor", "."]);
+        assert!(resolve_effective(&parsed, &cfg).is_err());
     }
 }

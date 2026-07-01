@@ -8,8 +8,10 @@ use dk_doctor_rpgmaker::load_project;
 /// Command code for «Exit Event Processing» (as in the CLI).
 const EXIT_CODES: &[u16] = &[115];
 
-/// Codes for an «untraceable exit» used by `stuck-autorun` (as in the CLI).
-const OPAQUE_CODES: &[u16] = &[117, 355, 356, 357];
+/// Codes for an «untraceable exit» used by `stuck-autorun` (as in the CLI): a
+/// script (355) and plugin commands (356/357). A common-event call (117) is
+/// handled interprocedurally by the rule, not by this list.
+const OPAQUE_CODES: &[u16] = &[355, 356, 357];
 
 /// Command code for the «Label» marker (as in the CLI).
 const LABEL_CODES: &[u16] = &[118];
@@ -176,14 +178,27 @@ fn each_planted_rule_fires_exactly() {
         Msg::UnreachableSelfSwitch { ch: 'D', event: 3 }
     ));
 
-    // 11. dead-common-event: CE #2 "Orphan" (trigger None, no calls).
-    //     CE #1 "Init" (Autorun) and CE #3/#4 (call each other) — not flagged.
+    // 11. dead-common-event: CE #2 "Orphan" (trigger None, no calls) PLUS the
+    //     mutually-calling pair CE #3/#4 — they call only each other and no live
+    //     caller ever enters the cluster, so transitive reachability marks all
+    //     three dead. CE #1 "Init" (Autorun) is a live root → not flagged.
     let dead_ce = by_rule(&findings, "dead-common-event");
-    assert_eq!(dead_ce.len(), 1, "ровно одно мёртвое общее событие");
-    assert!(matches!(
-        &dead_ce[0].message,
-        Msg::DeadCommonEvent { id: 2, name } if name == "Orphan"
-    ));
+    let mut dead_ce_ids: Vec<u32> = dead_ce
+        .iter()
+        .filter_map(|f| match &f.message {
+            Msg::DeadCommonEvent { id, .. } => Some(*id),
+            _ => None,
+        })
+        .collect();
+    dead_ce_ids.sort_unstable();
+    assert_eq!(
+        dead_ce_ids,
+        vec![2, 3, 4],
+        "три мёртвых общих события (2 + кластер 3/4)"
+    );
+    assert!(dead_ce.iter().any(|f| matches!(
+        &f.message, Msg::DeadCommonEvent { id: 2, name } if name == "Orphan"
+    )));
 
     // 12. cyclic-common-events: CE #3 ↔ CE #4 (mutual 117).
     let cyclic = by_rule(&findings, "cyclic-common-events");
@@ -350,7 +365,8 @@ fn summary_counts_match() {
     // cyclic-common-events + shadowed-page + stuck-autorun +
     // unknown-plugin-command + impossible-condition.
     assert_eq!(report.summary.warnings, 11, "11 предупреждений");
-    // Info: unreachable-maps + orphan-assets + dead-common-event.
-    assert_eq!(report.summary.infos, 3, "3 информационных");
+    // Info: unreachable-maps + orphan-assets + dead-common-event ×3 (CE #2 +
+    // the mutually-dead cluster CE #3/#4).
+    assert_eq!(report.summary.infos, 5, "5 информационных");
     assert_eq!(report.exit_code(), 2, "код выхода 2 (есть ошибки)");
 }

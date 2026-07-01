@@ -5,9 +5,10 @@
 //! that are finalized after population. The adapter uses [`IrBuilder`].
 
 use crate::ir::asset::AssetKey;
+use crate::ir::common_event_summary::CommonEventSummary;
 use crate::ir::dead_branch::DeadBranch;
-use crate::ir::edge::EdgeRecord;
-use crate::ir::entity::{DbKind, Entity, EntityId, EntityNode};
+use crate::ir::edge::{Edge, EdgeRecord};
+use crate::ir::entity::{CeTrigger, DbKind, Entity, EntityId, EntityNode};
 use crate::ir::location::Location;
 use crate::ir::plugin_meta::{PluginCommandCall, PluginMeta};
 use crate::ir::self_switch::{SelfSwitchKey, SelfSwitchTable};
@@ -101,6 +102,12 @@ pub struct Ir {
     /// flag them: such an event runs deferred, which the static analysis cannot
     /// see as a 117.
     pub reserved_common_events: FxHashSet<u32>,
+    /// Per-common-event behavioral summaries (interprocedural: reachability and
+    /// exit-provision over the CommonEvent→CommonEvent call graph). Computed once
+    /// in [`IrBuilder::finish`]; keyed by common-event id. Consumed by
+    /// `dead-common-event` (reachability) and `stuck-autorun` (a `117` that hides
+    /// no exit). See [`CommonEventSummary`].
+    pub common_event_summaries: FxHashMap<u32, CommonEventSummary>,
 }
 
 impl Ir {
@@ -143,6 +150,7 @@ pub struct IrBuilder {
     plugin_referenced_maps: FxHashSet<u32>,
     dead_branches: Vec<DeadBranch>,
     reserved_common_events: FxHashSet<u32>,
+    opaque_common_events: FxHashSet<u32>,
 }
 
 impl IrBuilder {
@@ -164,6 +172,7 @@ impl IrBuilder {
             plugin_referenced_maps: FxHashSet::default(),
             dead_branches: Vec::new(),
             reserved_common_events: FxHashSet::default(),
+            opaque_common_events: FxHashSet::default(),
         }
     }
 
@@ -246,6 +255,16 @@ impl IrBuilder {
         }
     }
 
+    /// Marks a common event as **opaque** — its command list contains a script or
+    /// plugin command (355/356/357), so its effect on game state is not statically
+    /// known. Only the adapter can supply this (it holds the numeric command
+    /// codes); [`finish`](Self::finish) folds it into the event's summary.
+    pub fn mark_common_event_opaque(&mut self, id: u32) {
+        if id != 0 {
+            self.opaque_common_events.insert(id);
+        }
+    }
+
     /// Registers an asset reference site.
     pub fn add_asset_ref(&mut self, key: AssetKey, location: Location) {
         self.asset_refs.push((key, location));
@@ -314,6 +333,13 @@ impl IrBuilder {
             }
         }
 
+        let common_event_summaries = build_common_event_summaries(
+            &self.entities,
+            &self.edges,
+            &self.reserved_common_events,
+            &self.opaque_common_events,
+        );
+
         Ir {
             engine: self.engine,
             entities: self.entities,
@@ -333,6 +359,133 @@ impl IrBuilder {
             plugin_referenced_maps: self.plugin_referenced_maps,
             dead_branches: self.dead_branches,
             reserved_common_events: self.reserved_common_events,
+            common_event_summaries,
         }
     }
+}
+
+/// Builds the per-common-event summaries (locals + transitive verdicts) from the
+/// finalized entity/edge arena. Split out of [`IrBuilder::finish`] for clarity.
+///
+/// Locals (`writes_switch`/`transfers`/`calls`/…) come from the event's outgoing
+/// edges; `opaque` is supplied by the adapter (it holds the command codes). Two
+/// fixed-point passes over the CommonEvent→CommonEvent call graph then compute
+/// `provides_exit` (does a `117` hide a possible exit?) and `reachable` (can the
+/// event ever run?). Both passes are monotone, so cycles converge safely.
+fn build_common_event_summaries(
+    entities: &[EntityNode],
+    edges: &[EdgeRecord],
+    reserved: &FxHashSet<u32>,
+    opaque: &FxHashSet<u32>,
+) -> FxHashMap<u32, CommonEventSummary> {
+    // entity id → common-event id, plus per-event trigger and the id set.
+    let mut ce_id_of: FxHashMap<EntityId, u32> = FxHashMap::default();
+    let mut summaries: FxHashMap<u32, CommonEventSummary> = FxHashMap::default();
+    let mut triggered: FxHashSet<u32> = FxHashSet::default();
+    for node in entities {
+        if let Entity::CommonEvent(ce) = &node.kind {
+            ce_id_of.insert(node.id, ce.id);
+            summaries
+                .entry(ce.id)
+                .or_insert_with(|| CommonEventSummary::new(ce.id, opaque.contains(&ce.id)));
+            if ce.trigger != CeTrigger::None {
+                triggered.insert(ce.id);
+            }
+        }
+    }
+
+    // Local facts from each event's outgoing edges + roots seeded by any
+    // call/reference that originates OUTSIDE the common-event call graph
+    // (a map/troop event 117, an effect-44 DB ref, a plugin reference).
+    let mut roots: FxHashSet<u32> = FxHashSet::default();
+    for rec in edges {
+        let from_ce = ce_id_of.get(&rec.from).copied();
+        match &rec.edge {
+            Edge::CallsCommonEvent { common_event_id } => match from_ce {
+                Some(src) => {
+                    if let Some(s) = summaries.get_mut(&src)
+                        && !s.calls.contains(common_event_id)
+                    {
+                        s.calls.push(*common_event_id);
+                    }
+                }
+                None => {
+                    roots.insert(*common_event_id);
+                }
+            },
+            // An effect-44 / plugin reference from a non-common-event entity is a
+            // live entry point into the callee.
+            Edge::ReferencesDbId {
+                kind: DbKind::CommonEvent,
+                id,
+            } if from_ce.is_none() => {
+                roots.insert(*id);
+            }
+            _ => {}
+        }
+        let Some(src) = from_ce else { continue };
+        let Some(s) = summaries.get_mut(&src) else {
+            continue;
+        };
+        match &rec.edge {
+            Edge::WritesSwitch { .. } => s.writes_switch = true,
+            Edge::ReadsSwitch { .. } => s.reads_switch = true,
+            Edge::WritesVariable { .. } => s.writes_variable = true,
+            Edge::ReadsVariable { .. } => s.reads_variable = true,
+            Edge::Transfer { .. } => s.transfers = true,
+            _ => {}
+        }
+    }
+
+    // Pass 1 — provides_exit fixed point. Seed with the local verdict; propagate
+    // "a callee provides an exit" up the graph. A call to an unknown id (no
+    // summary) is treated as exit-providing: we cannot prove it is a no-op.
+    for id in summaries.keys().copied().collect::<Vec<_>>() {
+        let local = summaries[&id].local_provides_exit();
+        summaries.get_mut(&id).unwrap().provides_exit = local;
+    }
+    let mut changed = true;
+    while changed {
+        changed = false;
+        for id in summaries.keys().copied().collect::<Vec<_>>() {
+            if summaries[&id].provides_exit {
+                continue;
+            }
+            let calls = summaries[&id].calls.clone();
+            let exits = calls
+                .iter()
+                .any(|c| summaries.get(c).is_none_or(|s| s.provides_exit));
+            if exits {
+                summaries.get_mut(&id).unwrap().provides_exit = true;
+                changed = true;
+            }
+        }
+    }
+
+    // Pass 2 — reachability. Roots: triggered events, reserved events, and events
+    // entered from outside the call graph. Then walk `calls` edges transitively.
+    for id in triggered.iter().chain(reserved.iter()) {
+        roots.insert(*id);
+    }
+    let mut stack: Vec<u32> = roots
+        .iter()
+        .copied()
+        .filter(|id| summaries.contains_key(id))
+        .collect();
+    while let Some(id) = stack.pop() {
+        let calls = match summaries.get_mut(&id) {
+            Some(s) if !s.reachable => {
+                s.reachable = true;
+                s.calls.clone()
+            }
+            _ => continue,
+        };
+        for c in calls {
+            if summaries.contains_key(&c) {
+                stack.push(c);
+            }
+        }
+    }
+
+    summaries
 }

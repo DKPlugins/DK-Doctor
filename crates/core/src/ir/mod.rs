@@ -5,6 +5,7 @@
 //! [`asset`] (asset references), [`graph`] (the [`Ir`] container and its builder).
 
 pub mod asset;
+pub mod common_event_summary;
 pub mod dead_branch;
 pub mod edge;
 pub mod entity;
@@ -15,6 +16,7 @@ pub mod self_switch;
 pub mod symbols;
 
 pub use asset::{AssetKey, AssetKind, AssetRef};
+pub use common_event_summary::CommonEventSummary;
 pub use dead_branch::{CmpOp, DeadBranch};
 pub use edge::{Edge, EdgeRecord, TransferDesignation};
 pub use entity::{

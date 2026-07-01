@@ -44,8 +44,8 @@ Enemy #1, Animation #1, Tileset #1, Actor #1. Ids `#99` absent everywhere.
 | `dead-code-after-exit` | `Map001` / EV002 "Logic" / page1 — cmds after `115` Exit at indent 0 (cmd9 `101`, cmd10 `108`; cmd11 blank `0` is the list terminator, a no-op, not flagged) | unreachable: the `115` at cmd8 ends event processing |
 | `dead-self-switch` | `Map001` / EV003 "SwitchLogic" / page1 / cmd1 — `123` sets self-switch **B** | written once, never read by any page condition / `111` type 2 |
 | `unreachable-self-switch` | `Map001` / EV003 "SwitchLogic" / page2 condition — requires self-switch **D** | no `123` on EV003 ever sets D → page unreachable (plugin caveat) |
-| `dead-common-event` | `CommonEvents.json` / CE **#2 "Orphan"** | trigger None, no incoming `117` and no effect-44 reference (CLI: opt-in via `--dead-common-events`) |
-| `cyclic-common-events` | `CommonEvents.json` / CE **#3 ↔ #4** | mutual `117` calls form a cycle (canonical `[3,4]`) |
+| `dead-common-event` | `CommonEvents.json` / CE **#2 "Orphan"** + the cluster **#3/#4** | #2: trigger None, no caller. #3/#4: they call only each other and no live caller ever enters the cluster → transitive reachability marks all three dead (3 findings; CLI: opt-in via `--dead-common-events`) |
+| `cyclic-common-events` | `CommonEvents.json` / CE **#3 ↔ #4** | mutual `117` calls form a cycle (canonical `[3,4]`) — also flagged as dead, since nothing triggers the cluster |
 | `unknown-plugin-command` | `CommonEvents.json` / CE **#1 "Init"** — `357` call `("DummyPlugin","doNothing")` | DummyPlugin is not in `plugins.js`, so the pair isn't in any `@command` registry (structured 357) |
 
 ### `referential-integrity` breakdown (5 findings)
@@ -70,7 +70,8 @@ Enemy #1, Animation #1, Tileset #1, Actor #1. Ids `#99` absent everywhere.
 - self-switch **C** on EV003: written (`123`, page1 cmd0) **and** read (page1 condition) → neither
   dead nor unreachable.
 - CE **#1 "Init"** (Autorun): runs by trigger even though uncalled → not a dead common event.
-- CE **#3/#4**: each is `117`-called by the other → not dead common events (the cycle is the bug).
+- CE **#3/#4**: they `117`-call each other but no live caller reaches the cluster → both dead
+  (the cycle is *also* a bug, so they show under both `dead-common-event` and `cyclic-common-events`).
 - Asset `Actor1` face (`101`), enemy `Slime` (`img/enemies` + `img/sv_enemies`),
   effect `Explosion` (`effects/Explosion.efkefc`): present + referenced → not broken / not orphan.
 - The inner `115` Exit at indent 1 (EV002 cmd6): sits inside a conditional branch; the
@@ -96,13 +97,13 @@ Enemy #1, Animation #1, Tileset #1, Actor #1. Ids `#99` absent everywhere.
 ## Expected verdict
 
 Running all built-in rules (`Registry::with_builtin().run_all`, incl. `orphan-assets`):
-**11 errors, 11 warnings, 3 infos**. Process exit code `2` (errors present).
+**11 errors, 11 warnings, 5 infos**. Process exit code `2` (errors present).
 
 - errors (11): `referential-integrity` ×5 + `broken-transfer` + `broken-assets` ×3
   (GhostPic + MissingArena + Outside_B) + `missing-base` + `plugin-load-order`.
 - warnings (11): `uninitialized-symbols` + `dead-variables` + `dead-code-after-exit` ×2 +
   `dead-self-switch` + `unreachable-self-switch` + `cyclic-common-events` + `shadowed-page` +
   `stuck-autorun` + `unknown-plugin-command` + `impossible-condition`.
-- infos (3): `unreachable-maps` + `orphan-assets` + `dead-common-event`.
+- infos (5): `unreachable-maps` + `orphan-assets` + `dead-common-event` ×3 (CE #2 + cluster #3/#4).
 
-CLI default (`--orphans` off) hides the single `orphan-assets` info → 11 errors / 11 warnings / 2 infos.
+CLI default (`--orphans` off) hides the single `orphan-assets` info → 11 errors / 11 warnings / 4 infos.

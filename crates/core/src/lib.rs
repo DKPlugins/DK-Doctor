@@ -12,9 +12,9 @@ pub mod rules;
 
 pub use finding::{Category, Confidence, Finding, Severity};
 pub use ir::{
-    AssetKey, AssetKind, AssetRef, CeTrigger, CmpOp, CommandMeta, CommonEvent, DatabaseRecord,
-    DbKind, DeadBranch, Edge, EdgeRecord, Engine, Entity, EntityId, EntityNode, Event, Ir,
-    IrBuilder, Location, LocationPath, Map, MethodPatch, Page, PageConditions, PathSeg,
+    AssetKey, AssetKind, AssetRef, CeTrigger, CmpOp, CommandMeta, CommonEvent, CommonEventSummary,
+    DatabaseRecord, DbKind, DeadBranch, Edge, EdgeRecord, Engine, Entity, EntityId, EntityNode,
+    Event, Ir, IrBuilder, Location, LocationPath, Map, MethodPatch, Page, PageConditions, PathSeg,
     PluginCommand, PluginCommandCall, PluginMeta, PluginOrderDeps, ScriptBlackbox, Site,
     SymbolInfo, SymbolTable, TransferDesignation, Troop, VehicleKind, VehicleStartMap,
 };

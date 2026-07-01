@@ -3,6 +3,7 @@
 //! Positional path to the project root, output format, minimum level, and
 //! lists of enabled/disabled rules by their id.
 
+use crate::config::FailOn;
 use camino::Utf8PathBuf;
 use clap::{Parser, ValueEnum};
 use dk_doctor_core::{Lang, Severity};
@@ -52,6 +53,53 @@ pub struct Args {
     /// are false positives).
     #[arg(long = "dead-common-events")]
     pub dead_common_events: bool,
+
+    /// Path to the project config (`.dk-doctor.toml`). Defaults to
+    /// `<project>/.dk-doctor.toml`; if absent, built-in defaults are used.
+    #[arg(long, value_name = "PATH")]
+    pub config: Option<Utf8PathBuf>,
+
+    /// CI gate: which findings make the process exit non-zero. Overrides the
+    /// config. Without it, the legacy exit code is used (2 errors / 1 warnings / 0).
+    #[arg(long = "fail-on", value_enum)]
+    pub fail_on: Option<FailOnArg>,
+
+    /// Baseline file of finding fingerprints (JSON array) used by
+    /// `--fail-on new`. Defaults to the config `baseline` if set.
+    #[arg(long, value_name = "PATH")]
+    pub baseline: Option<Utf8PathBuf>,
+
+    /// Write the current findings' fingerprints to this file (a fresh baseline)
+    /// and exit without gating.
+    #[arg(long = "write-baseline", value_name = "PATH")]
+    pub write_baseline: Option<Utf8PathBuf>,
+}
+
+/// CI gate mode as a CLI argument.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
+pub enum FailOnArg {
+    /// Never fail.
+    Never,
+    /// Fail on any error.
+    Error,
+    /// Fail on any warning or error.
+    Warning,
+    /// Fail on any finding.
+    All,
+    /// Fail only on findings absent from the baseline.
+    New,
+}
+
+impl From<FailOnArg> for FailOn {
+    fn from(value: FailOnArg) -> Self {
+        match value {
+            FailOnArg::Never => FailOn::Never,
+            FailOnArg::Error => FailOn::Error,
+            FailOnArg::Warning => FailOn::Warning,
+            FailOnArg::All => FailOn::All,
+            FailOnArg::New => FailOn::New,
+        }
+    }
 }
 
 /// Report output format.

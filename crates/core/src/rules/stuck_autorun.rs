@@ -15,8 +15,14 @@
 //! Conservatism (to avoid flooding a plugin/script-heavy corpus):
 //! - we flag only **gated** pages (an Autorun without conditions is most often a cutscene);
 //! - a self-switch write by the event — a frequent legitimate "exit" — suppresses the trigger;
-//! - a page with a common-event call / plugin command / script
-//!   (`opaque_exit_codes`) may exit untraceably — we don't flag it;
+//! - a page with a plugin command / script (`opaque_exit_codes`, 355/356/357) may
+//!   exit untraceably — we don't flag it;
+//! - a page whose **common-event call** (117) could hide an exit — its callee (or
+//!   anything it transitively calls) writes a switch/variable, transfers, or is
+//!   opaque ([`CommonEventSummary::provides_exit`](crate::ir::CommonEventSummary)) —
+//!   is spared. A `117` to a **proven cosmetic** common event (text/pictures/sound
+//!   only) no longer hides the exit, so such a page is still flagged: that is the
+//!   interprocedural refinement over the old blunt "any `117` suppresses";
 //! - a gating-switch that is set to OFF somewhere (`ever_set_off`), is never
 //!   written (never ON) or is managed by a plugin (`declared_by_plugin`/
 //!   `set_by_plugin`, Tier A/B) — the page is clearable/unactivatable, we don't flag it;
@@ -100,6 +106,26 @@ impl Rule for StuckAutorun {
             .filter(|r| matches!(r.edge, Edge::WritesSwitch { .. } | Edge::Transfer { .. }))
             .map(|r| r.from)
             .collect();
+        // (3) page entities that call a common event which could hide an exit:
+        // the callee (transitively) provides an exit, or its summary is unknown.
+        // A `117` to a PROVEN cosmetic common event (provides_exit == false) is
+        // intentionally NOT counted here, so such a page can still be flagged.
+        let pages_calling_opaque_ce: FxHashSet<EntityId> = ctx
+            .ir
+            .edges
+            .iter()
+            .filter_map(|r| match r.edge {
+                Edge::CallsCommonEvent { common_event_id } => {
+                    let hides_exit = ctx
+                        .ir
+                        .common_event_summaries
+                        .get(&common_event_id)
+                        .is_none_or(|s| s.provides_exit);
+                    hides_exit.then_some(r.from)
+                }
+                _ => None,
+            })
+            .collect();
 
         let mut findings = Vec::new();
         for (_, pages) in pages_by_event(ctx.ir) {
@@ -126,17 +152,22 @@ impl Rule for StuckAutorun {
                 if pages_with_self_switch_write.contains(&page.entity) {
                     continue;
                 }
-                // The page calls a common event / plugin command / script
-                // (`opaque_exit_codes`) ⇒ the exit may hide there, static analysis does not
-                // trace it. We don't flag it (flood fix on plugin/script-heavy:
-                // F&H2, Heroines). Without this the rule "catches" exits it does not
-                // see, and produces noise.
+                // The page runs a plugin command / script (`opaque_exit_codes`,
+                // 355/356/357) ⇒ the exit may hide in code static analysis cannot
+                // trace. We don't flag it (flood fix on plugin/script-heavy: F&H2,
+                // Heroines).
                 if page
                     .page
                     .commands
                     .iter()
                     .any(|c| ctx.opaque_exit_codes.contains(&c.code))
                 {
+                    continue;
+                }
+                // The page calls a common event that could hide an exit (its
+                // callee provides an exit transitively, or is unknown). A `117` to
+                // a proven-cosmetic common event does NOT suppress here.
+                if pages_calling_opaque_ce.contains(&page.entity) {
                     continue;
                 }
                 // If the gating condition can be cleared (the switch is set to OFF
@@ -406,6 +437,100 @@ mod tests {
         b.symbols_mut().mark_variable_set_by_plugin(9);
         let ir = b.finish();
         assert!(StuckAutorun.run(&RuleCtx::new(&ir)).is_empty());
+    }
+
+    /// Pushes a common event entity with the given id/trigger (helper for the
+    /// 117 look-through tests).
+    fn push_ce(b: &mut IrBuilder, id: u32, trigger: crate::ir::CeTrigger) -> EntityId {
+        b.push_entity(
+            Entity::CommonEvent(crate::ir::CommonEvent {
+                id,
+                name: format!("CE{id}"),
+                trigger,
+                command_count: 0,
+            }),
+            Location::new("data/CommonEvents.json", vec![PathSeg::CommonEvent(id)]),
+        )
+    }
+
+    #[test]
+    fn spares_autorun_calling_exit_providing_common_event() {
+        // Autorun gated on self-switch 'A', no direct exit, but it calls CE #10
+        // which writes a switch → the callee provides an exit → not flagged.
+        use crate::ir::CeTrigger;
+        let mut b = Ir::builder(Engine::Mz);
+        let base = vec![PathSeg::Map(1), PathSeg::Event(5), PathSeg::Page(1)];
+        let page = b.push_entity(
+            Entity::Page(Page {
+                conditions: gated(),
+                trigger: PageTrigger::Autorun,
+                command_count: 1,
+                commands: vec![crate::ir::CommandMeta {
+                    code: 117,
+                    indent: 0,
+                    index: 0,
+                    location: Location::file_only("data/Map001.json"),
+                }],
+            }),
+            Location::new("data/Map001.json", base),
+        );
+        b.push_edge(
+            page,
+            Edge::CallsCommonEvent {
+                common_event_id: 10,
+            },
+            Location::file_only("data/Map001.json"),
+        );
+        // CE #10 writes a switch → provides_exit.
+        let ce = push_ce(&mut b, 10, CeTrigger::None);
+        b.push_edge(
+            ce,
+            Edge::WritesSwitch { switch_id: 7 },
+            Location::file_only("data/CommonEvents.json"),
+        );
+        let ir = b.finish();
+        let ctx = RuleCtx::with_codes(&ir, &[], &[355, 356, 357], &[]);
+        assert!(StuckAutorun.run(&ctx).is_empty());
+    }
+
+    #[test]
+    fn flags_autorun_calling_cosmetic_common_event() {
+        // Same page, but CE #10 is purely cosmetic (no switch/var write, no
+        // transfer, not opaque) → its call cannot hide an exit → still a soft-lock.
+        use crate::ir::CeTrigger;
+        let mut b = Ir::builder(Engine::Mz);
+        let base = vec![PathSeg::Map(1), PathSeg::Event(5), PathSeg::Page(1)];
+        let page = b.push_entity(
+            Entity::Page(Page {
+                conditions: gated(),
+                trigger: PageTrigger::Autorun,
+                command_count: 1,
+                commands: vec![crate::ir::CommandMeta {
+                    code: 117,
+                    indent: 0,
+                    index: 0,
+                    location: Location::file_only("data/Map001.json"),
+                }],
+            }),
+            Location::new("data/Map001.json", base),
+        );
+        b.push_edge(
+            page,
+            Edge::CallsCommonEvent {
+                common_event_id: 10,
+            },
+            Location::file_only("data/Map001.json"),
+        );
+        // CE #10 has no edges → provides_exit == false (proven cosmetic).
+        let _ = push_ce(&mut b, 10, CeTrigger::None);
+        let ir = b.finish();
+        let ctx = RuleCtx::with_codes(&ir, &[], &[355, 356, 357], &[]);
+        let f = StuckAutorun.run(&ctx);
+        assert_eq!(f.len(), 1);
+        assert!(matches!(
+            f[0].message,
+            Msg::StuckAutorun { page: 1, event: 5 }
+        ));
     }
 
     #[test]
