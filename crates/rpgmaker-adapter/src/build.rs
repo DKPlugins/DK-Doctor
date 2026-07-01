@@ -451,6 +451,19 @@ fn load_common_events(b: &mut IrBuilder, data: &Utf8Path, warns: &mut LoadWarnin
             }),
             loc.clone(),
         );
+        // Opaque = the list contains a script / plugin command (355/356/357),
+        // whose effect on game state static analysis cannot follow. Feeds the
+        // common-event summary (`provides_exit`) computed in `finish`.
+        if ce.list.iter().any(|c| {
+            matches!(
+                c.code,
+                crate::codes::SCRIPT
+                    | crate::codes::PLUGIN_COMMAND_MV
+                    | crate::codes::PLUGIN_COMMAND_MZ
+            )
+        }) {
+            b.mark_common_event_opaque(ce.id);
+        }
         // switchId — READ when trigger!=0.
         if ce.trigger != 0 && ce.switch_id != 0 {
             b.symbols_mut().add_switch_read(

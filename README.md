@@ -54,13 +54,68 @@ cargo run -p dk-doctor -- --format json "/path/to/project"
 
 Useful flags: `--format console|json`, `--lang ru|en` (report language; defaults to the OS locale — `ru*` → Russian,
 otherwise English), `--min-severity info|warning|error`, `--enable <rule>` / `--disable <rule>`, `--orphans` (enable
-the opt-in `orphan-assets` rule).
+the opt-in `orphan-assets` rule), `--fail-on <mode>` and `--baseline <file>` (CI gating — see below).
 
 The console and JSON reports are multilingual. JSON additionally emits each finding's language-neutral
-`message_key` + structured `args` alongside the rendered `message`, so downstream tooling can re-render in any
-language.
+`message_key` + structured `args`, a stable `fingerprint`, and the rendered `message`, so downstream tooling can
+re-render in any language and track a finding across runs.
 
-Exit codes (CI-friendly): `0` clean · `1` warnings present · `2` errors present.
+Exit codes (default, CI-friendly): `0` clean · `1` warnings present · `2` errors present.
+
+## CI & project config
+
+Drop a `.dk-doctor.toml` at your project root to set defaults and gate CI. Every field is optional; **CLI flags always
+override the config**.
+
+```toml
+# .dk-doctor.toml
+min_severity = "warning"        # info | warning | error  (display filter)
+disable      = ["orphan-assets"]
+orphans      = false            # enable the opt-in orphan-assets rule
+dead_common_events = false      # enable the opt-in dead-common-event rule
+
+# CI gate: which findings make the process exit non-zero.
+#   never | error | warning | all | new
+fail_on  = "new"
+baseline = ".dk-doctor-baseline.json"   # for fail_on = "new"
+
+# Acknowledge a known false positive. `fingerprint` is the value from the JSON
+# report; `reason` documents the decision (required in spirit — no silent mutes).
+[[suppress]]
+fingerprint = "1a2b3c4d5e6f7a8b"
+reason = "vendor map ships an intentionally-unreferenced placeholder"
+```
+
+**`--fail-on <mode>`** decides the exit code (`0` pass / `1` fail) instead of the default severity mapping:
+
+| mode | fails when |
+|---|---|
+| `never` | never (always exit 0) |
+| `error` | any error remains |
+| `warning` | any warning or error remains |
+| `all` | any finding remains |
+| `new` | any finding is **not** in the baseline |
+
+**Baselines** let you adopt dk-doctor on an existing project without fixing everything at once: snapshot the current
+findings and only gate on *new* ones.
+
+```sh
+# 1) record the current findings as the accepted baseline
+dk-doctor --write-baseline .dk-doctor-baseline.json "/path/to/project"
+
+# 2) in CI: fail only when a NEW finding appears (not in the baseline)
+dk-doctor --fail-on new --baseline .dk-doctor-baseline.json "/path/to/project"
+```
+
+The `fingerprint` is language-neutral (`rule` + file + breadcrumb path + structured args), so it is stable across
+`--lang` and matches the desktop app's run-diff — a baseline written by one is understood by the other.
+
+Example GitHub Actions step:
+
+```yaml
+- name: dk-doctor gate
+  run: dk-doctor --fail-on new --baseline .dk-doctor-baseline.json .
+```
 
 ## Diagnostic rules
 

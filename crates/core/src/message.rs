@@ -265,6 +265,21 @@ pub enum Chrome {
     OrphansHint,
     /// Hint about `--dead-common-events`.
     DeadCommonEventsHint,
+    /// Note: N findings were suppressed by the project config (`.dk-doctor.toml`).
+    SuppressedNote {
+        /// Number of findings hidden by `[[suppress]]` entries.
+        count: usize,
+    },
+    /// Note: a fresh baseline was written with N fingerprints.
+    BaselineWritten {
+        /// Number of fingerprints written.
+        count: usize,
+    },
+    /// Note: N findings are new relative to the baseline (`--fail-on new`).
+    NewFindingsNote {
+        /// Number of findings absent from the baseline.
+        count: usize,
+    },
     /// Header of the "files skipped" note: N project files could not be parsed.
     ParseWarningsHeader {
         /// Number of project files that could not be parsed and were skipped.
@@ -916,6 +931,15 @@ fn render_chrome_ru(chrome: &Chrome) -> String {
              события динамически (вычисляемый id / struct-параметр), что статике не видно. \
              Показать неиспользуемые общие события: --dead-common-events"
             .to_string(),
+        Chrome::SuppressedNote { count } => {
+            format!("{count} находок(и) скрыто через .dk-doctor.toml ([[suppress]]).")
+        }
+        Chrome::BaselineWritten { count } => {
+            format!("Baseline записан: {count} отпечаток(ов).")
+        }
+        Chrome::NewFindingsNote { count } => {
+            format!("{count} новых находок(и) относительно baseline.")
+        }
         Chrome::ParseWarningsHeader { count } => format!(
             "{count} файл(ов) проекта не удалось разобрать — они пропущены, отчёт может быть \
              неполным:"
@@ -961,6 +985,15 @@ fn render_chrome_en(chrome: &Chrome) -> String {
              parameter), which static analysis cannot see. \
              Show unused common events: --dead-common-events"
                 .to_string()
+        }
+        Chrome::SuppressedNote { count } => {
+            format!("{count} finding(s) hidden via .dk-doctor.toml ([[suppress]]).")
+        }
+        Chrome::BaselineWritten { count } => {
+            format!("Baseline written: {count} fingerprint(s).")
+        }
+        Chrome::NewFindingsNote { count } => {
+            format!("{count} new finding(s) relative to the baseline.")
         }
         Chrome::ParseWarningsHeader { count } => format!(
             "{count} project file(s) could not be parsed — skipped, the report may be incomplete:"

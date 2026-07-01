@@ -28,6 +28,9 @@ struct Finding<'a> {
     severity: dk_doctor_core::Severity,
     category: dk_doctor_core::Category,
     confidence: dk_doctor_core::Confidence,
+    /// Stable, language-neutral fingerprint (rule + file + path + args). Consumers
+    /// (baselines, the desktop run-diff) key "the same finding" on this.
+    fingerprint: String,
     file: &'a camino::Utf8Path,
     path: String,
     /// Stable message key (language-neutral), e.g. `"orphan_asset"`.
@@ -83,6 +86,7 @@ pub fn render(report: &Report, engine: &str, lang: Lang) -> String {
             severity: f.severity,
             category: f.category,
             confidence: f.confidence,
+            fingerprint: f.fingerprint(),
             file: &f.location.file,
             path: f.location.path.to_string(),
             message_key: message_key(&f.message),
