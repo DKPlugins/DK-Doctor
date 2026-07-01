@@ -303,9 +303,14 @@ pub fn collect(
         }
 
         // Assets loaded at runtime with a literal name (ImageManager.load*/
-        // AudioManager.play*) → plugin-managed: not broken, not orphan.
+        // AudioManager.play*) → plugin-managed: not broken, not orphan. Normalize
+        // the literal the same way on-disk files are (strip extension/encryption/
+        // bracket prefix) so the key matches the scanned assets_present entry.
         for (kind, name) in facts.provided_assets {
-            b.add_plugin_provided_asset(AssetKey::new(kind, name));
+            let norm = crate::assets::normalize_filename(&name);
+            if !norm.is_empty() {
+                b.add_plugin_provided_asset(AssetKey::new(kind, norm));
+            }
         }
 
         // registerCommand → extend the command registry (plugin name from the argument).
@@ -593,6 +598,46 @@ mod tests {
             "инференция не эмитит referential-integrity"
         );
 
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    fn collect_marks_literal_loaded_assets_provided_normalized() {
+        // A plugin that loads assets by literal name at runtime → plugin-provided,
+        // with the name normalized like on-disk files (extension stripped) so the
+        // key matches the scanned asset.
+        let tmp = std::env::temp_dir().join(format!("dkpluginloads{}", std::process::id()));
+        let _ = std::fs::create_dir_all(&tmp);
+        let src = r#"/*:
+ * @plugindesc loads assets at runtime
+ */
+(function(){
+  ImageManager.loadPicture("Splash.png");
+  AudioManager.playSe({ name: "Cursor", volume: 90 });
+})();"#;
+        std::fs::write(tmp.join("Loader.js"), src).unwrap();
+
+        let entry = PluginEntry {
+            name: "Loader".to_string(),
+            status: true,
+            description: String::new(),
+            parameters: BTreeMap::new(),
+        };
+        let mut b = Ir::builder(Engine::Mz);
+        let mut warns = Vec::new();
+        let dir = camino::Utf8PathBuf::from_path_buf(tmp.clone()).unwrap();
+        let pjs = camino::Utf8Path::new("js/plugins.js");
+        collect(&mut b, &[entry], &dir, pjs, &mut warns);
+        let ir = b.finish();
+        assert!(
+            ir.plugin_provided_assets
+                .contains(&AssetKey::new(AssetKind::Picture, "Splash")),
+            "extension stripped to match on-disk key"
+        );
+        assert!(
+            ir.plugin_provided_assets
+                .contains(&AssetKey::new(AssetKind::Se, "Cursor"))
+        );
         let _ = std::fs::remove_dir_all(&tmp);
     }
 

@@ -43,6 +43,10 @@ enum Tok {
     LBracket,
     /// `]`
     RBracket,
+    /// `{`
+    LBrace,
+    /// `}`
+    RBrace,
     /// Other (any other token; serves as a barrier for the patterns).
     Other,
 }
@@ -68,6 +72,8 @@ fn lex(src: &str) -> Vec<Tok> {
                 Punct::Equal => Tok::Eq,
                 Punct::OpenBracket => Tok::LBracket,
                 Punct::CloseBracket => Tok::RBracket,
+                Punct::OpenBrace => Tok::LBrace,
+                Punct::CloseBrace => Tok::RBrace,
                 _ => Tok::Other,
             }),
             // `this` is a keyword, not an Ident — keep it as an Id so the
@@ -524,20 +530,24 @@ fn scan_asset_loads(t: &[Tok], out: &mut Vec<(AssetKind, String)>) {
             }
             continue;
         }
-        // Audio: `{ name: "X" }` object — find the `name:` string inside the call.
+        // Audio: `{ name: "X" }` object — the `name:` key at the TOP LEVEL of the
+        // AudioParams object (brace depth 1), so a nested `{ …: { name: "…" } }`
+        // does not hijack the match. Bounded by the call's own parentheses.
         if let Some(kind) = audio_play_kind(method) {
             let mut j = i + 2;
-            let mut depth = 0i32;
+            let (mut paren, mut brace) = (0i32, 0i32);
             while j < t.len() {
                 match &t[j] {
-                    Tok::LParen => depth += 1,
+                    Tok::LParen => paren += 1,
                     Tok::RParen => {
-                        if depth == 0 {
+                        if paren == 0 {
                             break;
                         }
-                        depth -= 1;
+                        paren -= 1;
                     }
-                    Tok::Id(k) if k == "name" => {
+                    Tok::LBrace => brace += 1,
+                    Tok::RBrace => brace -= 1,
+                    Tok::Id(k) if k == "name" && brace == 1 => {
                         // `name` <colon:Other> "<value>"
                         if let Some(Tok::Str(v)) = t.get(j + 2)
                             && !v.trim().is_empty()
@@ -905,6 +915,18 @@ mod tests {
         );
         assert!(!f.provided_assets.iter().any(|(k, _)| *k == AssetKind::Bgm));
         assert!(!f.provided_assets.iter().any(|(_, n)| n == "nope"));
+    }
+
+    #[test]
+    fn audio_scan_takes_top_level_name_not_nested() {
+        // A nested object with its own `name:` must not hijack the top-level match.
+        let src = r#"AudioManager.playSe({ fallback: { name: "Wrong" }, name: "Correct" });"#;
+        let f = analyze_plugin(src);
+        assert!(
+            f.provided_assets
+                .contains(&(AssetKind::Se, "Correct".to_string()))
+        );
+        assert!(!f.provided_assets.iter().any(|(_, n)| n == "Wrong"));
     }
 
     #[test]

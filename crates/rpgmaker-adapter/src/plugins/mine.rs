@@ -113,9 +113,29 @@ fn folder_label(kind: AssetKind) -> &'static str {
     kind.folder()
 }
 
-/// Escapes a string for a double-quoted TOML value.
+/// Escapes a string as a double-quoted TOML basic string. TOML forbids raw
+/// control characters, so newline/tab/etc. (which the lexer can produce from a JS
+/// `"a\nb"` literal) are escaped — otherwise the emitted skeleton would not parse.
 fn toml_str(s: &str) -> String {
-    format!("\"{}\"", s.replace('\\', "\\\\").replace('"', "\\\""))
+    let mut out = String::with_capacity(s.len() + 2);
+    out.push('"');
+    for c in s.chars() {
+        match c {
+            '"' => out.push_str("\\\""),
+            '\\' => out.push_str("\\\\"),
+            '\n' => out.push_str("\\n"),
+            '\r' => out.push_str("\\r"),
+            '\t' => out.push_str("\\t"),
+            '\u{08}' => out.push_str("\\b"),
+            '\u{0c}' => out.push_str("\\f"),
+            c if (c as u32) < 0x20 || c == '\u{7f}' => {
+                out.push_str(&format!("\\u{:04X}", c as u32));
+            }
+            c => out.push(c),
+        }
+    }
+    out.push('"');
+    out
 }
 
 /// Renders a [`MinedProfile`] into a commented, ready-to-review TOML skeleton.
@@ -270,5 +290,26 @@ Game_Interpreter.prototype.pluginCommand = function(command, args) {
         let m = mine("Risky", "var f = new Function('return 1');");
         assert!(m.uses_dynamic_code);
         assert!(to_toml_skeleton(&m).contains("invisible to static analysis"));
+    }
+
+    #[test]
+    fn skeleton_stays_valid_toml_with_control_chars_in_names() {
+        // A literal TAB is legal inside a JS double-quoted string, so the lexer can
+        // hand us a real control char. TOML basic strings forbid raw control chars,
+        // so the skeleton must escape it and still parse.
+        let src = "PluginManager.registerCommand(\"P\", \"Open\tShop\", () => {});";
+        let m = mine("P", src);
+        let toml = to_toml_skeleton(&m);
+        assert!(toml.contains("Open\\tShop"), "control char must be escaped");
+        let parsed: toml::Value = toml::from_str(&toml).expect("skeleton must be valid TOML");
+        let cmds = parsed
+            .get("plugin_command")
+            .and_then(|v| v.as_array())
+            .expect("plugin_command array");
+        // Round-trips back to the original tab-bearing string.
+        assert!(
+            cmds.iter()
+                .any(|c| c.get("command").and_then(|v| v.as_str()) == Some("Open\tShop"))
+        );
     }
 }
