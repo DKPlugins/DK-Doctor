@@ -1,8 +1,7 @@
-# Host-neutral toolchain pin для apps/desktop.
-#
-# Корневой rust-toolchain.toml пинит хост-триплет `stable-x86_64-pc-windows-msvc`,
-# который rustup подхватывает обходом вверх и для apps/desktop тоже — это ломает
-# macOS-плечо CI (там нет windows-msvc). Локальный файл переопределяет канал на
-# host-neutral `stable`, поэтому каждый хост резолвит свой родной toolchain.
+# Host-neutral toolchain pin for the Tauri desktop app, kept in sync with the
+# repository root. A bare version (not a host-specific channel name) resolves to
+# each host's native toolchain, so the macOS CI leg builds without tripping over
+# a Windows-only toolchain name, and offline checks do not re-resolve `stable`.
 [toolchain]
-channel = "stable"
+channel = "1.96.0"
+components = ["rustfmt", "clippy"]
