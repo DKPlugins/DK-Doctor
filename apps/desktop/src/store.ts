@@ -24,6 +24,8 @@ export interface Settings {
   deadCommonEvents: boolean;
   /** Check for new versions on GitHub at startup (the only network request). */
   checkUpdates: boolean;
+  /** Auto re-scan the open project when its `data/` files change on disk. */
+  watch: boolean;
 }
 
 /** Default settings (theme/language — system, opt-in rules off). */
@@ -34,6 +36,7 @@ export const defaultSettings = (): Settings => ({
   orphans: false,
   deadCommonEvents: false,
   checkUpdates: true,
+  watch: false,
 });
 
 /** A recent-project record. */
@@ -53,6 +56,7 @@ export interface RecentProject {
 const SETTINGS_KEY = "dkd.settings.v1";
 const RECENT_KEY = "dkd.recent.v1";
 const SNAPSHOT_KEY = "dkd.snapshots.v1";
+const HISTORY_KEY = "dkd.history.v1";
 const ATLAS_KEY = "dkd.atlas.v1";
 /** How many projects keep a remembered atlas view (oldest evicted). */
 const ATLAS_MAX_PROJECTS = 24;
@@ -61,6 +65,10 @@ const RECENT_MAX = 8;
 const SNAPSHOT_MAX_PROJECTS = 24;
 /** Cap on stored fingerprints per project (huge reports stay bounded). */
 const SNAPSHOT_MAX_FPS = 6000;
+/** How many past runs the Time Machine keeps per project (oldest dropped). */
+const HISTORY_MAX_POINTS = 40;
+/** How many projects keep a run history (oldest project evicted). */
+const HISTORY_MAX_PROJECTS = 24;
 
 function readJson(key: string): unknown {
   try {
@@ -100,6 +108,7 @@ export function loadSettings(): Settings {
       typeof r.deadCommonEvents === "boolean" ? r.deadCommonEvents : d.deadCommonEvents,
     checkUpdates:
       typeof r.checkUpdates === "boolean" ? r.checkUpdates : d.checkUpdates,
+    watch: typeof r.watch === "boolean" ? r.watch : d.watch,
   };
 }
 
@@ -219,9 +228,88 @@ export function removeSnapshot(path: string): void {
   }
 }
 
-/** Drops all stored run snapshots. */
+/** Drops all stored run snapshots (and the Time Machine history). */
 export function clearSnapshots(): void {
   writeJson(SNAPSHOT_KEY, {});
+  writeJson(HISTORY_KEY, {});
+}
+
+// ===========================================================================
+// Run history — Time Machine timeline of past runs, kept per project path
+// ===========================================================================
+
+/** One past run reduced to the timeline essentials (no findings kept). */
+export interface RunHistoryPoint {
+  /** Timestamp of the run (ms epoch). */
+  ts: number;
+  /** Health score at that run (0..100). */
+  score: number;
+  /** Error count at that run. */
+  errors: number;
+  /** Warning count at that run. */
+  warnings: number;
+  /** Info count at that run. */
+  infos: number;
+}
+
+/** Validates a stored history point. */
+function isHistoryPoint(x: unknown): x is RunHistoryPoint {
+  if (!x || typeof x !== "object") return false;
+  const r = x as Record<string, unknown>;
+  return (
+    typeof r.ts === "number" &&
+    typeof r.score === "number" &&
+    typeof r.errors === "number" &&
+    typeof r.warnings === "number" &&
+    typeof r.infos === "number"
+  );
+}
+
+/** Reads the whole history map (path → points), filtered of garbage. */
+function loadHistories(): Record<string, RunHistoryPoint[]> {
+  const raw = readJson(HISTORY_KEY);
+  if (!raw || typeof raw !== "object") return {};
+  const out: Record<string, RunHistoryPoint[]> = {};
+  for (const [path, arr] of Object.entries(raw as Record<string, unknown>)) {
+    if (Array.isArray(arr)) out[path] = arr.filter(isHistoryPoint);
+  }
+  return out;
+}
+
+/** Timeline of past runs for `path` (oldest → newest), or `[]` if none. */
+export function loadHistory(path: string): RunHistoryPoint[] {
+  return loadHistories()[path] ?? [];
+}
+
+/**
+ * Appends a run to the project's timeline (oldest → newest), capping the point
+ * count and evicting the oldest projects beyond the limit. A run within the same
+ * second as the last recorded one replaces it (a re-run without disk changes
+ * should not pile up identical points).
+ */
+export function appendHistory(path: string, point: RunHistoryPoint): RunHistoryPoint[] {
+  const map = loadHistories();
+  const prev = map[path] ?? [];
+  const last = prev[prev.length - 1];
+  const dedup =
+    last && Math.floor(last.ts / 1000) === Math.floor(point.ts / 1000)
+      ? prev.slice(0, -1)
+      : prev;
+  const list = [...dedup, point].slice(-HISTORY_MAX_POINTS);
+  delete map[path];
+  map[path] = list;
+  const entries = Object.entries(map);
+  writeJson(HISTORY_KEY, Object.fromEntries(entries.slice(-HISTORY_MAX_PROJECTS)));
+  return list;
+}
+
+/** Removes the history for a single project path. */
+export function removeHistory(path: string): void {
+  const map = loadHistories();
+  if (path in map) {
+    delete map[path];
+    writeJson(HISTORY_KEY, map);
+  }
 }
 
 // ===========================================================================

@@ -375,6 +375,147 @@ pub fn event_page_commands(
         .collect())
 }
 
+/// Map-transition graph for the desktop "Map graph" view: nodes are maps, edges
+/// are direct Transfer Player (201) commands between them. Render-only and
+/// on-demand — the analysis IR is never touched (the `unreachable-maps` rule owns
+/// the analytical claim; this is a spatial overview aid).
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MapGraph {
+    /// Start map id from `System.json` (0 = unset).
+    pub start_map_id: u32,
+    /// Every map present in the project.
+    pub nodes: Vec<MapNode>,
+    /// Direct (statically resolved) transfer edges, deduplicated.
+    pub edges: Vec<MapEdge>,
+}
+
+/// One map node in the transition graph.
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MapNode {
+    /// Map id.
+    pub id: u32,
+    /// Display name (may be empty).
+    pub name: String,
+    /// Count of by-variable (dynamic) transfer exits not resolvable statically —
+    /// so the UI can note the graph is not exhaustive for this map.
+    pub dynamic_exits: u32,
+}
+
+/// A directed transfer edge (source map → target map).
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MapEdge {
+    /// Source map id.
+    pub from: u32,
+    /// Target map id (may be absent from `nodes` → a broken transfer).
+    pub to: u32,
+}
+
+/// Builds the map-transition graph sidecar for a project root.
+///
+/// Scans each `MapXXX.json` for Transfer Player (201) commands: direct targets
+/// (`params[0]==0`) become edges; by-variable targets are counted per map as
+/// `dynamic_exits` (their destination cannot be known statically). Tolerant to
+/// junk — unreadable/unparseable maps are skipped.
+pub fn map_graph(root: &Utf8Path) -> Result<MapGraph, crate::AdapterError> {
+    let Some(layout) = detect_layout(root) else {
+        return Err(crate::AdapterError::ProjectNotFound(root.to_string()));
+    };
+    let data = layout.data_dir();
+
+    // Start map id (best-effort — a missing/garbled System.json means 0).
+    let start_map_id = std::fs::read_to_string(data.join("System.json").as_std_path())
+        .ok()
+        .and_then(|t| serde_json::from_str::<serde_json::Value>(&t).ok())
+        .and_then(|v| v.get("startMapId").and_then(serde_json::Value::as_u64))
+        .unwrap_or(0) as u32;
+
+    // Names + the authoritative set of existing map ids (MapInfos + MapNNN files).
+    let infos: Vec<Option<MapInfo>> =
+        std::fs::read_to_string(data.join("MapInfos.json").as_std_path())
+            .ok()
+            .and_then(|t| serde_json::from_str(&t).ok())
+            .unwrap_or_default();
+    let mut names: std::collections::HashMap<u32, String> = std::collections::HashMap::new();
+    let mut ids: std::collections::BTreeSet<u32> = std::collections::BTreeSet::new();
+    for info in infos.into_iter().flatten() {
+        ids.insert(info.id);
+        names.insert(info.id, info.name);
+    }
+    if let Ok(entries) = std::fs::read_dir(data.as_std_path()) {
+        for entry in entries.flatten() {
+            if let Some(name) = entry.file_name().to_str()
+                && let Some(rest) = name.strip_prefix("Map")
+                && let Some(num) = rest.strip_suffix(".json")
+                && let Ok(id) = num.parse::<u32>()
+            {
+                ids.insert(id);
+            }
+        }
+    }
+
+    // Collect edges (deduped) + dynamic-exit counts by scanning each map.
+    let mut edge_set: std::collections::BTreeSet<(u32, u32)> = std::collections::BTreeSet::new();
+    let mut dynamic: std::collections::HashMap<u32, u32> = std::collections::HashMap::new();
+    for &id in &ids {
+        if id == 0 {
+            continue;
+        }
+        let file = format!("Map{id:03}.json");
+        let Ok(text) = std::fs::read_to_string(data.join(&file).as_std_path()) else {
+            continue;
+        };
+        let Ok(m) = serde_json::from_str::<RawCmdMap>(&text) else {
+            continue;
+        };
+        for ev in m.events.into_iter().flatten() {
+            for page in ev.pages {
+                for cmd in page.list {
+                    if cmd.code != 201 {
+                        continue;
+                    }
+                    let designation = cmd.parameters.first().and_then(serde_json::Value::as_i64);
+                    let target = cmd.parameters.get(1).and_then(serde_json::Value::as_i64);
+                    match designation {
+                        Some(0) | None => {
+                            if let Some(to) = target
+                                && to > 0
+                            {
+                                edge_set.insert((id, to as u32));
+                            }
+                        }
+                        _ => {
+                            *dynamic.entry(id).or_default() += 1;
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    let nodes = ids
+        .iter()
+        .filter(|&&id| id != 0)
+        .map(|&id| MapNode {
+            id,
+            name: names.get(&id).cloned().unwrap_or_default(),
+            dynamic_exits: dynamic.get(&id).copied().unwrap_or(0),
+        })
+        .collect();
+    let edges = edge_set
+        .into_iter()
+        .map(|(from, to)| MapEdge { from, to })
+        .collect();
+
+    Ok(MapGraph {
+        start_map_id,
+        nodes,
+        edges,
+    })
+}
+
 /// Reads a project image file (e.g. `img/tilesets/World.png`) and returns its
 /// raw bytes. The path is resolved relative to the project asset root (root or
 /// `www/`). If the plain `.png` is absent, the RPG Maker encrypted variants
@@ -452,4 +593,59 @@ fn decrypt_rpgmaker(bytes: &[u8], key: &[u8]) -> Vec<u8> {
         *b ^= key[i];
     }
     out
+}
+
+#[cfg(test)]
+mod graph_tests {
+    use super::*;
+
+    /// Root of the synthetic MZ fixture (shared with the CLI integration tests).
+    fn fixture_root() -> camino::Utf8PathBuf {
+        camino::Utf8PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("..")
+            .join("..")
+            .join("testdata")
+            .join("mz-fixture")
+    }
+
+    #[test]
+    fn map_graph_reports_start_edges_and_broken_target() {
+        let g = map_graph(&fixture_root()).expect("fixture graph loads");
+        assert_eq!(g.start_map_id, 1, "startMapId from System.json");
+
+        let ids: std::collections::BTreeSet<u32> = g.nodes.iter().map(|n| n.id).collect();
+        assert!(
+            ids.contains(&1) && ids.contains(&2) && ids.contains(&3),
+            "maps 1..3 present"
+        );
+        // The missing transfer target (99) is not materialized as a node.
+        assert!(!ids.contains(&99), "nonexistent map 99 is not a node");
+
+        let has = |from: u32, to: u32| g.edges.iter().any(|e| e.from == from && e.to == to);
+        assert!(has(1, 2), "direct transfer 1->2");
+        assert!(
+            has(1, 99),
+            "broken transfer 1->99 is still emitted as an edge"
+        );
+
+        // The fixture uses only direct transfers.
+        assert!(
+            g.nodes.iter().all(|n| n.dynamic_exits == 0),
+            "no dynamic exits"
+        );
+    }
+
+    #[test]
+    fn map_graph_deduplicates_edges() {
+        let g = map_graph(&fixture_root()).expect("fixture graph loads");
+        let mut seen = std::collections::BTreeSet::new();
+        for e in &g.edges {
+            assert!(
+                seen.insert((e.from, e.to)),
+                "edge {}->{} duplicated",
+                e.from,
+                e.to
+            );
+        }
+    }
 }

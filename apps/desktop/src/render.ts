@@ -5,12 +5,17 @@ import type {
   Finding,
   Lang,
   MapAtlas,
+  MapGraph,
   ProjectStats,
   Report,
   Severity,
   UpdateInfo,
 } from "./api";
 import { computeHealth } from "./health";
+import { computeReadiness, type GateStatus, type Verdict } from "./readiness";
+import { scoreSparklineSVG } from "./timeline";
+import { graphIsRenderable, graphStats, renderMapGraph } from "./mapgraph";
+import type { RunHistoryPoint } from "./store";
 import {
   AGG_THRESHOLD,
   CATEGORIES,
@@ -67,10 +72,16 @@ export interface State {
   diff?: RunDiff;
   /** Whether the list is filtered to findings new since the last run. */
   newOnly: boolean;
-  /** Report sub-view: spatial atlas (default) or the flat findings list. */
-  reportMode: "atlas" | "list";
+  /** Report sub-view: spatial atlas (default), the flat list, or the map graph. */
+  reportMode: "atlas" | "list" | "graph";
   /** Per-map geometry sidecar (undefined until loaded; failure keeps it unset). */
   atlas?: MapAtlas[];
+  /** Map-transition graph sidecar (undefined until loaded; failure keeps it unset). */
+  graph?: MapGraph;
+  /** Open overlay modal (release readiness / time machine / export), or null. */
+  overlay: null | "readiness" | "timeline" | "export";
+  /** Run history of the open project for the Time Machine (loaded on scan). */
+  history?: RunHistoryPoint[];
   /** Selected atlas target: a map id, the project board, the overview, or null. */
   atlasSel: number | "project" | "overview" | null;
   /** Selected event id on the current atlas map (null = none). */
@@ -248,6 +259,7 @@ export function welcomeHTML(s: State): string {
     `<span class="dor">${esc(t(lang, "wOr"))}</span>` +
     `<button class="btn btn--primary btn--md" data-act="pick">${icon("folder")} ${esc(t(lang, "wOpen"))}</button></div>` +
     `<span class="welcome__note">${icon("circle-check")} ${esc(t(lang, "wNote"))}</span>` +
+    badgesHTML(lang) +
     "</div>" +
     '<div class="welcome__right"><div class="welcome__rh">' +
     `<span class="t">${esc(t(lang, "wRecent"))}</span>` +
@@ -602,6 +614,7 @@ export function reportHTML(s: State): string {
   const modeSeg =
     '<div class="seg seg--mode">' +
     `<button data-mode="atlas" aria-pressed="${s.reportMode === "atlas" ? "true" : "false"}">${icon("map")} ${esc(t(lang, "modeAtlas"))}</button>` +
+    `<button data-mode="graph" aria-pressed="${s.reportMode === "graph" ? "true" : "false"}">${icon("waypoints")} ${esc(t(lang, "modeGraph"))}</button>` +
     `<button data-mode="list" aria-pressed="${s.reportMode === "list" ? "true" : "false"}">${icon("list")} ${esc(t(lang, "modeList"))}</button>` +
     "</div>";
   const groupSeg =
@@ -612,6 +625,7 @@ export function reportHTML(s: State): string {
         segBtn(s, "map", t(lang, "gMap")) +
         "</div></div>"
       : "";
+  const watchOn = s.settings.watch;
   const toolbar =
     '<div class="toolbar">' +
     `<div class="toolbar__proj"><span class="nm">${esc(s.project?.name ?? "")}</span>` +
@@ -620,15 +634,20 @@ export function reportHTML(s: State): string {
     '<span class="toolbar__spacer"></span>' +
     modeSeg +
     groupSeg +
+    `<button class="iconbtn${watchOn ? " is-on" : ""}" data-act="toggle-watch" title="${esc(t(lang, "watchTip"))}" aria-label="${esc(t(lang, "watchTip"))}" aria-pressed="${watchOn ? "true" : "false"}">${icon("activity")}</button>` +
+    `<button class="iconbtn" data-act="open-timeline" title="${esc(t(lang, "timelineTitle"))}" aria-label="${esc(t(lang, "timelineTitle"))}">${icon("history")}</button>` +
+    `<button class="btn btn--ghost btn--md" data-act="open-readiness">${icon("clipboard-check")} ${esc(t(lang, "readyTitle"))}</button>` +
     `<button class="iconbtn" data-act="rerun" title="${esc(t(lang, "rerun"))}" aria-label="${esc(t(lang, "rerun"))}">${icon("refresh-cw")}</button>` +
-    `<button class="btn btn--secondary btn--md" data-act="export">${icon("download")} ${esc(t(lang, "export"))}</button>` +
+    `<button class="btn btn--secondary btn--md" data-act="open-export">${icon("download")} ${esc(t(lang, "export"))}</button>` +
     "</div>";
   const body =
     s.reportMode === "atlas"
       ? atlasHTML(s)
-      : `<div class="rv__cols">` +
-        `<aside class="rail" aria-label="${esc(t(lang, "fSeverity"))}">${railHTML(s)}</aside>` +
-        `<main class="main" id="reportMain">${mainHTML(s)}</main></div>`;
+      : s.reportMode === "graph"
+        ? graphHTML(s)
+        : `<div class="rv__cols">` +
+          `<aside class="rail" aria-label="${esc(t(lang, "fSeverity"))}">${railHTML(s)}</aside>` +
+          `<main class="main" id="reportMain">${mainHTML(s)}</main></div>`;
   return `<div class="rv">${toolbar}${body}</div>`;
 }
 
@@ -997,6 +1016,78 @@ function projectBoardHTML(s: State, idx: AtlasIndex): string {
 }
 
 // ===========================================================================
+// Map graph — transition graph view (D6)
+// ===========================================================================
+
+/** Legend chip for the graph header. */
+function graphLegend(swatch: string, label: string): string {
+  return `<span class="mapgraph__leg"><span class="sw ${swatch}"></span>${esc(label)}</span>`;
+}
+
+/** Map-graph mode: transition graph of the project's maps (or its states). */
+function graphHTML(s: State): string {
+  const lang = s.lang;
+  const report = s.report!;
+  if (!s.graph) {
+    return (
+      '<div class="mapgraph"><div class="mapgraph__empty">' +
+      `<span class="spin"></span><span>${esc(t(lang, "graphLoading"))}</span></div></div>`
+    );
+  }
+  const g = s.graph;
+  const stats = graphStats(g);
+  if (!g.nodes.length) {
+    return (
+      '<div class="mapgraph"><div class="mapgraph__empty">' +
+      `${icon("waypoints")}<span>${esc(t(lang, "graphEmpty"))}</span></div></div>`
+    );
+  }
+
+  const pill = (cls: string, n: number, label: string) =>
+    `<span class="mapgraph__pill mapgraph__pill--${cls}">${n} ${esc(label)}</span>`;
+  const header =
+    '<div class="mapgraph__head">' +
+    `<span class="atlas__title">${esc(t(lang, "modeGraph"))}</span>` +
+    '<span class="atlas__hsp"></span>' +
+    pill("info", stats.reachable, t(lang, "graphReachable")) +
+    (stats.islands > 0 ? pill("warn", stats.islands, t(lang, "graphIslands")) : "") +
+    (stats.broken > 0 ? pill("err", stats.broken, t(lang, "graphBroken")) : "") +
+    "</div>";
+
+  const legend =
+    '<div class="mapgraph__legend">' +
+    graphLegend("lg-start", t(lang, "graphStart")) +
+    graphLegend("lg-island", t(lang, "graphIslands")) +
+    graphLegend("lg-broken", t(lang, "graphBroken")) +
+    `<span class="mapgraph__leghint">${esc(t(lang, "graphHint"))}</span>` +
+    "</div>";
+
+  let stage: string;
+  if (!graphIsRenderable(g)) {
+    stage =
+      `<div class="mapgraph__dense">${icon("triangle-alert")}` +
+      `<span>${stats.nodes} ${esc(t(lang, "graphTooDense"))}</span></div>`;
+  } else {
+    const idx = buildAtlasIndex(report, s.ignored);
+    const worst = new Map<number, Severity>();
+    for (const [mapId, indices] of idx.byMap) {
+      const w = worstSeverity(indices, report);
+      if (w) worst.set(mapId, w);
+    }
+    const selected = typeof s.atlasSel === "number" ? s.atlasSel : null;
+    const svg = renderMapGraph(g, {
+      selected,
+      worst,
+      islandTitle: t(lang, "graphIsland"),
+      brokenTitle: t(lang, "graphBrokenTip"),
+    });
+    stage = `<div class="mapgraph__scroll">${svg}</div>`;
+  }
+
+  return `<div class="mapgraph">${header}${legend}${stage}</div>`;
+}
+
+// ===========================================================================
 // Command context (drawer)
 // ===========================================================================
 
@@ -1162,4 +1253,135 @@ export function settingsHTML(s: State): string {
     `<div class="settings__about"><span>${esc(t(lang, "aboutOffline"))}</span><span class="v">v0.1.0</span></div>` +
     "</div>"
   );
+}
+
+// ===========================================================================
+// Trust badges (D8)
+// ===========================================================================
+
+/** Row of privacy/determinism badges (offline · deterministic · no telemetry). */
+export function badgesHTML(lang: Lang): string {
+  const b = (ic: string, label: string) =>
+    `<span class="badge"><span class="badge__ic">${icon(ic)}</span>${esc(label)}</span>`;
+  return (
+    '<div class="badges">' +
+    b("circle-check", t(lang, "badgeOffline")) +
+    b("badge-check", t(lang, "badgeDeterministic")) +
+    b("eye-off", t(lang, "badgeNoTelemetry")) +
+    "</div>"
+  );
+}
+
+// ===========================================================================
+// Overlay modals — release readiness (D4), time machine (D7), export (D5/D10)
+// ===========================================================================
+
+const GATE_ICON: Record<GateStatus, string> = {
+  pass: "circle-check",
+  warn: "triangle-alert",
+  fail: "octagon-alert",
+};
+const GATE_SEVVAR: Record<GateStatus, string> = {
+  pass: "--sev-ok",
+  warn: "--sev-warning",
+  fail: "--sev-error",
+};
+const VERDICT_STATUS: Record<Verdict, GateStatus> = {
+  ready: "pass",
+  attention: "warn",
+  blocked: "fail",
+};
+
+/** Shared overlay-card chrome (title bar + close + body). */
+function overlayShell(lang: Lang, title: string, ic: string, body: string): string {
+  return (
+    '<div class="overlaycard">' +
+    '<div class="overlaycard__bar">' +
+    `<span class="t">${icon(ic)} ${esc(title)}</span>` +
+    `<button class="iconbtn overlaycard__x" data-act="close-overlay" aria-label="${esc(t(lang, "close"))}">${icon("x")}</button>` +
+    "</div>" +
+    `<div class="overlaycard__body">${body}</div></div>`
+  );
+}
+
+/** Release-readiness checklist body (D4). */
+function readinessBody(s: State): string {
+  const lang = s.lang;
+  const r = computeReadiness(s.report!, s.ignored);
+  const vs = VERDICT_STATUS[r.verdict];
+  const banner =
+    `<div class="ready__verdict ready__verdict--${vs}">` +
+    `<span class="ic" style="color:var(${GATE_SEVVAR[vs]})">${icon(GATE_ICON[vs])}</span>` +
+    `<div><div class="vt">${esc(t(lang, `readyVerdict_${r.verdict}`))}</div>` +
+    `<div class="vs">${esc(t(lang, `readySub_${r.verdict}`))}</div></div></div>`;
+  const gates = r.gates
+    .map((g) => {
+      const cnt =
+        g.count > 0 ? `<span class="rgate__cnt">${g.count}</span>` : "";
+      return (
+        `<div class="rgate rgate--${g.status}">` +
+        `<span class="rgate__ic" style="color:var(${GATE_SEVVAR[g.status]})">${icon(GATE_ICON[g.status])}</span>` +
+        `<div class="rgate__main"><span class="rgate__nm">${esc(t(lang, `gate${g.key}Name`))}${cnt}</span>` +
+        `<span class="rgate__ds">${esc(t(lang, `gate${g.key}Desc`))}</span></div></div>`
+      );
+    })
+    .join("");
+  return banner + `<div class="ready__gates">${gates}</div>`;
+}
+
+/** Time-Machine timeline body (D7). */
+function timelineBody(s: State): string {
+  const lang = s.lang;
+  const hist = s.history ?? [];
+  if (hist.length < 1) {
+    return `<div class="tl__empty">${icon("history")}<span>${esc(t(lang, "timelineEmpty"))}</span></div>`;
+  }
+  const chart = `<div class="tl__chart">${scoreSparklineSVG(hist)}</div>`;
+  // Newest first, with a delta against the chronologically-previous run.
+  let rows = "";
+  for (let i = hist.length - 1; i >= 0; i--) {
+    const p = hist[i];
+    const prev = i > 0 ? hist[i - 1] : null;
+    const delta = prev ? p.score - prev.score : 0;
+    const deltaHtml =
+      prev && delta !== 0
+        ? `<span class="tl__delta tl__delta--${delta > 0 ? "up" : "down"}">${delta > 0 ? "+" : ""}${delta}</span>`
+        : '<span class="tl__delta tl__delta--flat">·</span>';
+    const cls = scoreClass(p.score);
+    rows +=
+      '<div class="tl__row">' +
+      `<span class="tl__when">${esc(relTime(lang, p.ts))}</span>` +
+      `<span class="tl__score tl__score--${cls}">${p.score}</span>${deltaHtml}` +
+      `<span class="tl__counts"><span class="e">${p.errors}</span> <span class="w">${p.warnings}</span> <span class="n">${p.infos}</span></span>` +
+      "</div>";
+  }
+  return chart + `<div class="tl__runs">${rows}</div>`;
+}
+
+/** Export chooser body (D5/D10 + JSON). */
+function exportBody(s: State): string {
+  const lang = s.lang;
+  const opt = (kind: string, ic: string, name: string, desc: string) =>
+    `<button class="exopt" data-export="${kind}">` +
+    `<span class="exopt__ic">${icon(ic)}</span>` +
+    `<span class="exopt__tx"><span class="nm">${esc(name)}</span><span class="ds">${esc(desc)}</span></span>` +
+    `<span class="exopt__chev">${icon("chevron-right")}</span></button>`;
+  return (
+    '<div class="exopts">' +
+    opt("html", "file-text", t(lang, "exportHtmlName"), t(lang, "exportHtmlDesc")) +
+    opt("png", "file-image", t(lang, "exportPngName"), t(lang, "exportPngDesc")) +
+    opt("json", "braces", t(lang, "exportJsonName"), t(lang, "exportJsonDesc")) +
+    "</div>"
+  );
+}
+
+/** Renders the open overlay modal (or "" when none). */
+export function overlayHTML(s: State): string {
+  if (!s.overlay || !s.report) return "";
+  const lang = s.lang;
+  if (s.overlay === "readiness")
+    return overlayShell(lang, t(lang, "readyTitle"), "clipboard-check", readinessBody(s));
+  if (s.overlay === "timeline")
+    return overlayShell(lang, t(lang, "timelineTitle"), "history", timelineBody(s));
+  return overlayShell(lang, t(lang, "exportTitle"), "download", exportBody(s));
 }
