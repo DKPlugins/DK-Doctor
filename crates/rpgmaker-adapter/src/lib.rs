@@ -91,6 +91,18 @@ pub fn load_project_with_warnings(root: &Utf8Path) -> Result<(Ir, Vec<String>), 
     Ok((ir, warnings.messages))
 }
 
+/// Mines a plugin's source into a **curated-profile skeleton** (commented TOML)
+/// for a human to review. Reuses the Tier-A/Tier-B analyzers; the game is not run.
+/// `name` is the plugin name (`.js` file stem == `$plugins[].name`).
+///
+/// The skeleton emits only low-false-positive facts (commands, dependencies, asset
+/// hints) as active tables; symbol/db params are left as commented guidance so a
+/// mined profile never silently introduces a false alarm. Powers `xtask
+/// mine-plugin-profile`.
+pub fn mine_plugin_profile(name: &str, src: &str) -> String {
+    plugins::mine::to_toml_skeleton(&plugins::mine::mine(name, src))
+}
+
 #[cfg(test)]
 mod tests {
     use crate::command::EventCommand;

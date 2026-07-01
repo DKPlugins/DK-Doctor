@@ -1,0 +1,315 @@
+//! Profile miner: distils a plugin's source into a **curator-facing** profile
+//! skeleton (TOML). It reuses the Tier-A annotation parser ([`super::annotations`])
+//! and the Tier-B JS heuristics ([`super::js`]) — it does NOT run the game.
+//!
+//! Deliberately conservative about what it emits: only the **low-false-positive**
+//! facts go into the skeleton as active tables — `[[plugin_command]]` (registered
+//! commands), `[dependency]` (`@base`/order), and asset hints. The risky tables
+//! (`[[symbol_param]]`/`[[db_param]]`, which would emit `certain` findings) are
+//! left to the human curator, surfaced only as commented hints — a mined profile
+//! must never silently introduce a false alarm. The output always carries a
+//! "review before use" header.
+
+use crate::plugins::{annotations, js};
+use dk_doctor_core::ir::AssetKind;
+
+/// The distilled, curator-facing view of a single plugin.
+#[derive(Debug, Default, PartialEq, Eq)]
+pub struct MinedProfile {
+    /// Plugin name (== `$plugins[].name` == `.js` file stem).
+    pub name: String,
+    /// Guessed target engine (`MV`/`MZ`/`both`).
+    pub target: &'static str,
+    /// Registered commands (MZ `registerCommand` + best-effort MV `pluginCommand`).
+    pub commands: Vec<String>,
+    /// `@base` hard dependencies.
+    pub base: Vec<String>,
+    /// `@orderAfter` dependencies.
+    pub order_after: Vec<String>,
+    /// `@orderBefore` dependencies.
+    pub order_before: Vec<String>,
+    /// Assets loaded by literal name at runtime, grouped by kind-folder label.
+    pub asset_hints: Vec<(String, Vec<String>)>,
+    /// Count of `@type`-typed params (already handled by Tier A — not re-declared).
+    pub typed_param_count: usize,
+    /// `Imported.X` identity keys.
+    pub imported_names: Vec<String>,
+    /// Plugin runs `eval`/`new Function` — some behavior is invisible to statics.
+    pub uses_dynamic_code: bool,
+    /// Defines an MV `pluginCommand` handler (command extraction is best-effort).
+    pub mv_command_handler: bool,
+    /// Whether the MZ `registerCommand` registry looked complete (all literal).
+    pub registry_complete: bool,
+}
+
+/// Distils `(name, src)` into a [`MinedProfile`].
+pub fn mine(name: &str, src: &str) -> MinedProfile {
+    let ann = annotations::parse(src);
+    let facts = js::analyze_plugin(src);
+
+    // Commands: MZ registerCommand + @command annotations + best-effort MV names.
+    let mut commands: Vec<String> = Vec::new();
+    for (_, cmd) in &facts.commands {
+        commands.push(cmd.clone());
+    }
+    commands.extend(ann.commands.iter().cloned());
+    commands.extend(facts.mv_commands.iter().cloned());
+    commands.sort();
+    commands.dedup();
+
+    // Group literal asset loads by kind-folder label (e.g. `img/pictures`).
+    let mut by_folder: std::collections::BTreeMap<String, Vec<String>> =
+        std::collections::BTreeMap::new();
+    for (kind, asset) in &facts.provided_assets {
+        by_folder
+            .entry(folder_label(*kind).to_string())
+            .or_default()
+            .push(asset.clone());
+    }
+    let mut asset_hints: Vec<(String, Vec<String>)> = by_folder
+        .into_iter()
+        .map(|(folder, mut names)| {
+            names.sort();
+            names.dedup();
+            (folder, names)
+        })
+        .collect();
+    asset_hints.sort();
+
+    // Target guess: MV if it owns a pluginCommand handler and registers nothing MZ;
+    // MZ if it uses registerCommand/@command; otherwise unknown → both.
+    let target = if facts.mv_command_handler && !facts.registers_any && ann.commands.is_empty() {
+        "MV"
+    } else if facts.registers_any || !ann.commands.is_empty() {
+        "MZ"
+    } else {
+        "both"
+    };
+
+    let typed_param_count = ann.params.iter().filter(|p| p.has_explicit_type).count();
+
+    let mut imported_names = facts.imported_names.clone();
+    imported_names.sort();
+    imported_names.dedup();
+
+    MinedProfile {
+        name: name.to_string(),
+        target,
+        commands,
+        base: ann.base.clone(),
+        order_after: ann.order_after.clone(),
+        order_before: ann.order_before.clone(),
+        asset_hints,
+        typed_param_count,
+        imported_names,
+        uses_dynamic_code: facts.uses_dynamic_code,
+        mv_command_handler: facts.mv_command_handler,
+        registry_complete: facts.registry_complete,
+    }
+}
+
+/// Standard kind-folder label for an [`AssetKind`] (mirror of `AssetKind::folder`).
+fn folder_label(kind: AssetKind) -> &'static str {
+    kind.folder()
+}
+
+/// Escapes a string as a double-quoted TOML basic string. TOML forbids raw
+/// control characters, so newline/tab/etc. (which the lexer can produce from a JS
+/// `"a\nb"` literal) are escaped — otherwise the emitted skeleton would not parse.
+fn toml_str(s: &str) -> String {
+    let mut out = String::with_capacity(s.len() + 2);
+    out.push('"');
+    for c in s.chars() {
+        match c {
+            '"' => out.push_str("\\\""),
+            '\\' => out.push_str("\\\\"),
+            '\n' => out.push_str("\\n"),
+            '\r' => out.push_str("\\r"),
+            '\t' => out.push_str("\\t"),
+            '\u{08}' => out.push_str("\\b"),
+            '\u{0c}' => out.push_str("\\f"),
+            c if (c as u32) < 0x20 || c == '\u{7f}' => {
+                out.push_str(&format!("\\u{:04X}", c as u32));
+            }
+            c => out.push(c),
+        }
+    }
+    out.push('"');
+    out
+}
+
+/// Renders a [`MinedProfile`] into a commented, ready-to-review TOML skeleton.
+pub fn to_toml_skeleton(p: &MinedProfile) -> String {
+    let mut out = String::new();
+    out.push_str(&format!(
+        "# Auto-mined profile skeleton for \"{}\" — REVIEW before use.\n",
+        p.name
+    ));
+    out.push_str(
+        "# Generated by `cargo xtask mine-plugin-profile`. Facts are best-effort static\n\
+         # hints; symbol/db params are intentionally NOT auto-emitted (they would raise\n\
+         # `certain` findings) — add them by hand after checking the plugin.\n",
+    );
+    out.push_str(&format!("name = {}\n", toml_str(&p.name)));
+    out.push_str(&format!("target = {}  # guessed\n", toml_str(p.target)));
+
+    if !p.commands.is_empty() {
+        out.push_str("\n# Registered commands (registerCommand / MV pluginCommand):\n");
+        for c in &p.commands {
+            out.push_str("[[plugin_command]]\n");
+            out.push_str(&format!("command = {}\n", toml_str(c)));
+        }
+    }
+
+    if !p.base.is_empty() || !p.order_after.is_empty() || !p.order_before.is_empty() {
+        out.push_str("\n# Load-order dependencies (@base / @orderAfter / @orderBefore):\n");
+        out.push_str("[dependency]\n");
+        let arr = |v: &[String]| -> String {
+            let items: Vec<String> = v.iter().map(|s| toml_str(s)).collect();
+            format!("[{}]", items.join(", "))
+        };
+        if !p.base.is_empty() {
+            out.push_str(&format!("base = {}\n", arr(&p.base)));
+        }
+        if !p.order_after.is_empty() {
+            out.push_str(&format!("order_after = {}\n", arr(&p.order_after)));
+        }
+        if !p.order_before.is_empty() {
+            out.push_str(&format!("order_before = {}\n", arr(&p.order_before)));
+        }
+    }
+
+    if !p.asset_hints.is_empty() {
+        out.push_str(
+            "\n# Assets loaded at runtime by literal name. If they live in a dedicated\n\
+             # subfolder, an [[asset_pattern]] (e.g. glob = \"img/pictures/busts/*\") keeps\n\
+             # them out of orphan/broken reports:\n",
+        );
+        for (folder, names) in &p.asset_hints {
+            out.push_str(&format!("#   {}: {}\n", folder, names.join(", ")));
+        }
+    }
+
+    // Notes (never active TOML — guidance for the curator).
+    let mut notes: Vec<String> = Vec::new();
+    if p.typed_param_count > 0 {
+        notes.push(format!(
+            "{} param(s) already carry an @type (handled by Tier A — do not re-declare).",
+            p.typed_param_count
+        ));
+    }
+    if p.mv_command_handler {
+        notes.push(
+            "MV pluginCommand handler detected; extracted command names are best-effort."
+                .to_string(),
+        );
+    }
+    if !p.registry_complete {
+        notes.push(
+            "Some registerCommand calls were dynamic — the command list may be incomplete."
+                .to_string(),
+        );
+    }
+    if p.uses_dynamic_code {
+        notes.push(
+            "Uses eval/new Function — part of the behavior is invisible to static analysis."
+                .to_string(),
+        );
+    }
+    if !p.imported_names.is_empty() {
+        notes.push(format!("Imported keys: {}.", p.imported_names.join(", ")));
+    }
+    if !notes.is_empty() {
+        out.push_str("\n# NOTES:\n");
+        for n in notes {
+            out.push_str(&format!("# * {n}\n"));
+        }
+    }
+
+    out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn mines_commands_deps_and_target_for_mz_plugin() {
+        let src = r#"/*:
+ * @target MZ
+ * @base CoreEngine
+ * @orderAfter EarlyPlugin
+ * @param Sw
+ * @type switch
+ * @command openShop
+ */
+(function(){
+  PluginManager.registerCommand("Shop", "openShop", () => {});
+  ImageManager.loadPicture("Splash");
+})();"#;
+        let m = mine("Shop", src);
+        assert_eq!(m.target, "MZ");
+        assert!(m.commands.contains(&"openShop".to_string()));
+        assert_eq!(m.base, vec!["CoreEngine".to_string()]);
+        assert_eq!(m.order_after, vec!["EarlyPlugin".to_string()]);
+        assert_eq!(m.typed_param_count, 1);
+        assert!(
+            m.asset_hints
+                .iter()
+                .any(|(f, ns)| f == "img/pictures" && ns.contains(&"Splash".to_string()))
+        );
+
+        let toml = to_toml_skeleton(&m);
+        assert!(toml.contains("REVIEW before use"));
+        assert!(toml.contains("[[plugin_command]]"));
+        assert!(toml.contains("command = \"openShop\""));
+        assert!(toml.contains("[dependency]"));
+        // The skeleton is itself valid TOML (comments + the active tables parse).
+        let _: toml::Value = toml::from_str(&toml).expect("skeleton is valid TOML");
+    }
+
+    #[test]
+    fn mines_mv_plugin_as_mv_with_best_effort_commands() {
+        let src = r#"/*:
+ * @plugindesc MV plugin
+ */
+Imported.MyMV = true;
+Game_Interpreter.prototype.pluginCommand = function(command, args) {
+    if (command === "DoThing") {}
+};"#;
+        let m = mine("MyMV", src);
+        assert_eq!(m.target, "MV");
+        assert!(m.mv_command_handler);
+        assert!(m.commands.contains(&"DoThing".to_string()));
+        assert!(m.imported_names.contains(&"MyMV".to_string()));
+        assert!(to_toml_skeleton(&m).contains("best-effort"));
+    }
+
+    #[test]
+    fn dynamic_code_surfaces_a_note() {
+        let m = mine("Risky", "var f = new Function('return 1');");
+        assert!(m.uses_dynamic_code);
+        assert!(to_toml_skeleton(&m).contains("invisible to static analysis"));
+    }
+
+    #[test]
+    fn skeleton_stays_valid_toml_with_control_chars_in_names() {
+        // A literal TAB is legal inside a JS double-quoted string, so the lexer can
+        // hand us a real control char. TOML basic strings forbid raw control chars,
+        // so the skeleton must escape it and still parse.
+        let src = "PluginManager.registerCommand(\"P\", \"Open\tShop\", () => {});";
+        let m = mine("P", src);
+        let toml = to_toml_skeleton(&m);
+        assert!(toml.contains("Open\\tShop"), "control char must be escaped");
+        let parsed: toml::Value = toml::from_str(&toml).expect("skeleton must be valid TOML");
+        let cmds = parsed
+            .get("plugin_command")
+            .and_then(|v| v.as_array())
+            .expect("plugin_command array");
+        // Round-trips back to the original tab-bearing string.
+        assert!(
+            cmds.iter()
+                .any(|c| c.get("command").and_then(|v| v.as_str()) == Some("Open\tShop"))
+        );
+    }
+}
