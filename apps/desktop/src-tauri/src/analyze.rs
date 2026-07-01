@@ -42,6 +42,12 @@ pub struct AnalyzeOpts {
     pub dead_common_events: bool,
     /// Enable the opt-in `circular-gate` (progression-deadlock prototype).
     pub circular_gates: bool,
+    /// Enable the opt-in `blocked-tile` (tile passability of transfers/start).
+    pub tiles: bool,
+    /// Enable the opt-in `db-reachability` (DB records referenced nowhere).
+    pub db_reachability: bool,
+    /// Enable the opt-in `picture-lifecycle` (picture operated before shown).
+    pub pictures: bool,
     /// Minimum severity: `"info"` | `"warning"` | `"error"` (otherwise no filter).
     pub min_severity: Option<String>,
 }
@@ -303,6 +309,12 @@ fn build_registry(opts: &AnalyzeOpts) -> Registry {
             opts.dead_common_events || opts.enable.iter().any(|e| e == id)
         } else if id == "circular-gate" {
             opts.circular_gates || opts.enable.iter().any(|e| e == id)
+        } else if id == "blocked-tile" {
+            opts.tiles || opts.enable.iter().any(|e| e == id)
+        } else if id == "db-reachability" {
+            opts.db_reachability || opts.enable.iter().any(|e| e == id)
+        } else if id == "picture-lifecycle" {
+            opts.pictures || opts.enable.iter().any(|e| e == id)
         } else if opts.enable.is_empty() {
             true
         } else {
@@ -340,6 +352,10 @@ fn builtin_rules() -> Vec<Box<dyn dk_doctor_core::Rule>> {
         Box::new(rules::plugin_conflict::PluginConflict),
         Box::new(rules::vehicle_start_map::VehicleStartMap),
         Box::new(rules::circular_gate::CircularGate),
+        Box::new(rules::picture_lifecycle::PictureLifecycle),
+        Box::new(rules::empty_event_page::EmptyEventPage),
+        Box::new(rules::blocked_tile::BlockedTile),
+        Box::new(rules::db_reachability::DbReachability),
     ]
 }
 
