@@ -73,6 +73,7 @@ fn message_key(msg: &Msg) -> &'static str {
         Msg::UnknownPluginCommand { .. } => "unknown_plugin_command",
         Msg::PluginConflict { .. } => "plugin_conflict",
         Msg::ImpossibleCondition { .. } => "impossible_condition",
+        Msg::CircularGate { .. } => "circular_gate",
     }
 }
 

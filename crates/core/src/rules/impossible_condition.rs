@@ -38,9 +38,11 @@ impl Rule for ImpossibleCondition {
                 location: db.location.clone(),
                 message: Msg::ImpossibleCondition {
                     var_id: db.var_id,
-                    value: db.value,
+                    value_lo: db.value_lo,
+                    value_hi: db.value_hi,
                     op: db.op,
-                    operand: db.operand,
+                    operand_lo: db.operand_lo,
+                    operand_hi: db.operand_hi,
                     result: db.result,
                 },
                 references: Vec::new(),
@@ -61,9 +63,11 @@ mod tests {
         b.add_dead_branch(DeadBranch {
             location: Location::file_only("data/Map001.json"),
             var_id: 5,
-            value: 0,
+            value_lo: 0,
+            value_hi: 0,
             op: CmpOp::Ge,
-            operand: 1,
+            operand_lo: 1,
+            operand_hi: 1,
             result: false,
         });
         let ir = b.finish();
@@ -82,6 +86,27 @@ mod tests {
                 ..
             }
         ));
+    }
+
+    #[test]
+    fn renders_range_when_value_is_not_exact() {
+        // A symbolic range (random 1..3) that makes `var == 5` always false.
+        let mut b = Ir::builder(Engine::Mz);
+        b.add_dead_branch(DeadBranch {
+            location: Location::file_only("data/Map001.json"),
+            var_id: 7,
+            value_lo: 1,
+            value_hi: 3,
+            op: CmpOp::Eq,
+            operand_lo: 5,
+            operand_hi: 5,
+            result: false,
+        });
+        let ir = b.finish();
+        let f = ImpossibleCondition.run(&RuleCtx::new(&ir));
+        assert_eq!(f.len(), 1);
+        let en = crate::message::render(&f[0].message, crate::message::Lang::En);
+        assert!(en.contains("1..3"), "range rendered: {en}");
     }
 
     #[test]

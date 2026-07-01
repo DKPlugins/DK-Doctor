@@ -190,21 +190,40 @@ pub enum Msg {
         /// missing/disabled (the command will not run at all).
         plugin_loaded: bool,
     },
-    /// A constant-resolvable condition (command 111): the variable was assigned
-    /// a literal value earlier in the list, so the comparison always yields the
-    /// same result → one of the branches is unreachable (dead code).
+    /// A constant-resolvable condition (command 111): symbolic-range propagation
+    /// (Control Variables set/add/sub/random) pins the variable to a value range
+    /// that makes the comparison always yield the same result → one of the
+    /// branches is unreachable (dead code).
     ImpossibleCondition {
         /// Id of the variable in the condition.
         var_id: u32,
-        /// The propagated constant value of the variable.
-        value: i64,
+        /// Lower bound of the variable's propagated value range.
+        value_lo: i64,
+        /// Upper bound of the variable's propagated value range (== `value_lo`
+        /// when the value is an exact constant).
+        value_hi: i64,
         /// Comparison operator.
         op: CmpOp,
-        /// Right-hand operand of the comparison.
-        operand: i64,
+        /// Lower bound of the right operand's value range.
+        operand_lo: i64,
+        /// Upper bound of the right operand's value range.
+        operand_hi: i64,
         /// What the condition is guaranteed to evaluate to (`true` → the "else"
         /// branch is dead; `false` → the "then" branch is dead).
         result: bool,
+    },
+    /// A progression deadlock among global switches (`circular-gate`): a switch is
+    /// turned ON only by events that are themselves gated behind switches which
+    /// (transitively) require it, so none of them can ever run — the content
+    /// behind the cycle is unreachable (soft-lock).
+    CircularGate {
+        /// Representative (lowest-id) switch of the deadlock cycle.
+        switch_id: u32,
+        /// Switch name from the database, if set.
+        name: Option<String>,
+        /// All switch ids forming the deadlock cycle (ascending, includes
+        /// `switch_id`).
+        cycle: Vec<u32>,
     },
     /// A single core method is patched by >=2 enabled plugins — load order
     /// decides, and the later one may silently clobber the earlier one's logic
@@ -265,6 +284,8 @@ pub enum Chrome {
     OrphansHint,
     /// Hint about `--dead-common-events`.
     DeadCommonEventsHint,
+    /// Hint about `--circular-gates`.
+    CircularGatesHint,
     /// Note: N findings were suppressed by the project config (`.dk-doctor.toml`).
     SuppressedNote {
         /// Number of findings hidden by `[[suppress]]` entries.
@@ -377,6 +398,23 @@ fn vehicle_label(v: VehicleKind, lang: Lang) -> &'static str {
             VehicleKind::Airship => "airship",
         },
     }
+}
+
+/// Renders an inclusive integer range as `N` (exact) or `N..M` (language-neutral).
+fn range_label(lo: i64, hi: i64) -> String {
+    if lo == hi {
+        lo.to_string()
+    } else {
+        format!("{lo}..{hi}")
+    }
+}
+
+/// Renders a switch-id list as `#a, #b, #c` (language-neutral).
+fn switch_list(ids: &[u32]) -> String {
+    ids.iter()
+        .map(|id| format!("#{id}"))
+        .collect::<Vec<_>>()
+        .join(", ")
 }
 
 /// Optional name insertion in guillemets / quotation marks.
@@ -605,9 +643,11 @@ fn render_ru(msg: &Msg) -> String {
         }
         Msg::ImpossibleCondition {
             var_id,
-            value,
+            value_lo,
+            value_hi,
             op,
-            operand,
+            operand_lo,
+            operand_hi,
             result,
         } => {
             let verdict = if *result {
@@ -620,13 +660,46 @@ fn render_ru(msg: &Msg) -> String {
             } else {
                 "«то»"
             };
+            let operand = range_label(*operand_lo, *operand_hi);
+            let value_clause = if value_lo == value_hi {
+                format!(
+                    "переменной #{var_id} присвоено значение {value_lo} ранее в этом списке команд \
+                     (Control Variables)"
+                )
+            } else {
+                format!(
+                    "переменная #{var_id} на этом участке может принимать только значения \
+                     {value_lo}..{value_hi} (Control Variables: set/add/sub/random)"
+                )
+            };
             format!(
-                "Условие (переменная #{var_id} {} {operand}) {verdict}: переменной #{var_id} \
-                 присвоено значение {value} ранее в этом списке команд (Control Variables) — \
+                "Условие (переменная #{var_id} {} {operand}) {verdict}: {value_clause} — \
                  сравнение не может дать другой результат, поэтому ветка {dead} никогда не \
-                 выполняется (мёртвый код). Достоверность likely: лёгкая constant-propagation в \
-                 пределах списка команд.",
+                 выполняется (мёртвый код). Достоверность likely: символьный диапазон в пределах \
+                 списка команд.",
                 op.symbol()
+            )
+        }
+        Msg::CircularGate {
+            switch_id,
+            name,
+            cycle,
+        } => {
+            let label = name_label(name, Lang::Ru);
+            let others: Vec<u32> = cycle.iter().copied().filter(|id| id != switch_id).collect();
+            let others_clause = if others.is_empty() {
+                String::new()
+            } else {
+                format!(" (в связке с переключателями {})", switch_list(&others))
+            };
+            format!(
+                "Переключатель #{switch_id}{label}{others_clause} — тупик прогрессии: он включается \
+                 (Control Switches ON) только событиями, которые сами открываются переключателями из \
+                 этой же связки, поэтому ни одно из них не может сработать первым — переключатель \
+                 никогда не станет ON, а завязанный на него контент недостижим (soft-lock). Учтены и \
+                 исключены переключатели, управляемые плагином (@type / $gameSwitches.setValue) или \
+                 скриптом. Достоверность likely: включение плагин-командой (356/357) статикой не \
+                 отслеживается."
             )
         }
         Msg::PluginConflict {
@@ -860,9 +933,11 @@ fn render_en(msg: &Msg) -> String {
         }
         Msg::ImpossibleCondition {
             var_id,
-            value,
+            value_lo,
+            value_hi,
             op,
-            operand,
+            operand_lo,
+            operand_hi,
             result,
         } => {
             let verdict = if *result {
@@ -871,12 +946,45 @@ fn render_en(msg: &Msg) -> String {
                 "always false"
             };
             let dead = if *result { "\"else\"" } else { "\"then\"" };
+            let operand = range_label(*operand_lo, *operand_hi);
+            let value_clause = if value_lo == value_hi {
+                format!(
+                    "variable #{var_id} was set to {value_lo} earlier in this command list \
+                     (Control Variables)"
+                )
+            } else {
+                format!(
+                    "variable #{var_id} can only hold values {value_lo}..{value_hi} at this point \
+                     (Control Variables: set/add/sub/random)"
+                )
+            };
             format!(
-                "Conditional branch (variable #{var_id} {} {operand}) is {verdict}: variable \
-                 #{var_id} was set to {value} earlier in this command list (Control Variables), so \
-                 the comparison cannot evaluate any other way — the {dead} branch never runs \
-                 (dead code). Confidence likely: light constant propagation within the command list.",
+                "Conditional branch (variable #{var_id} {} {operand}) is {verdict}: {value_clause}, \
+                 so the comparison cannot evaluate any other way — the {dead} branch never runs \
+                 (dead code). Confidence likely: symbolic range within the command list.",
                 op.symbol()
+            )
+        }
+        Msg::CircularGate {
+            switch_id,
+            name,
+            cycle,
+        } => {
+            let label = name_label(name, Lang::En);
+            let others: Vec<u32> = cycle.iter().copied().filter(|id| id != switch_id).collect();
+            let others_clause = if others.is_empty() {
+                String::new()
+            } else {
+                format!(" (together with switches {})", switch_list(&others))
+            };
+            format!(
+                "Switch #{switch_id}{label}{others_clause} — a progression deadlock: it is turned ON \
+                 (Control Switches) only by events that are themselves gated by switches from the \
+                 same cluster, so none of them can ever run first — the switch never becomes ON and \
+                 the content behind it is unreachable (soft-lock). Switches managed by a plugin \
+                 (@type / $gameSwitches.setValue) or a script are accounted for and excluded. \
+                 Confidence likely: a plugin command (356/357) turning it on is not tracked \
+                 statically."
             )
         }
         Msg::PluginConflict {
@@ -930,6 +1038,10 @@ fn render_chrome_ru(chrome: &Chrome) -> String {
              $gameTemp.reserveCommonEvent(N) отслеживается, но плагины часто резервируют общие \
              события динамически (вычисляемый id / struct-параметр), что статике не видно. \
              Показать неиспользуемые общие события: --dead-common-events"
+            .to_string(),
+        Chrome::CircularGatesHint => "circular-gate отключён по умолчанию (прототип): ищет тупики \
+             прогрессии — связки переключателей, которые взаимно блокируют включение друг друга. \
+             Включение плагин-командами не отслеживается. Показать: --circular-gates"
             .to_string(),
         Chrome::SuppressedNote { count } => {
             format!("{count} находок(и) скрыто через .dk-doctor.toml ([[suppress]]).")
@@ -986,6 +1098,10 @@ fn render_chrome_en(chrome: &Chrome) -> String {
              Show unused common events: --dead-common-events"
                 .to_string()
         }
+        Chrome::CircularGatesHint => "circular-gate is off by default (prototype): it looks for \
+             progression deadlocks — clusters of switches that mutually block each other from ever \
+             turning on. A plugin command turning a switch on is not tracked. Show: --circular-gates"
+            .to_string(),
         Chrome::SuppressedNote { count } => {
             format!("{count} finding(s) hidden via .dk-doctor.toml ([[suppress]]).")
         }

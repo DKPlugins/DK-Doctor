@@ -9,30 +9,74 @@ use crate::codes;
 use crate::command::EventCommand;
 use dk_doctor_core::ir::{
     AssetKey, AssetKind, CmpOp, DbKind, DeadBranch, Edge, EntityId, IrBuilder, Location, PathSeg,
-    PluginCommandCall, SelfSwitchKey, Site, TransferDesignation,
+    PluginCommandCall, SelfSwitchKey, Site, SwitchGate, TransferDesignation,
 };
 use std::collections::HashMap;
 
-/// Lightweight constant propagation of variable values **within a single command
-/// list**: tracks literals from command 122 (Control Variables) while honoring
-/// indent dominance. This underpins: resolution of by-variable transfers
-/// (201) / battles (301) and constant-resolvable conditions (111).
+/// An inclusive integer range `[lo, hi]` a variable is statically known to hold.
+/// An exact constant is the degenerate range `lo == hi`. All arithmetic saturates
+/// so a malformed/huge operand cannot overflow.
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+struct Interval {
+    lo: i64,
+    hi: i64,
+}
+
+impl Interval {
+    /// The exact value `v` as a one-point range.
+    fn exact(v: i64) -> Self {
+        Self { lo: v, hi: v }
+    }
+
+    /// A range from a raw `(a, b)` pair, normalized so `lo <= hi`.
+    fn range(a: i64, b: i64) -> Self {
+        Self {
+            lo: a.min(b),
+            hi: a.max(b),
+        }
+    }
+
+    /// `self + other` (interval addition, saturating).
+    fn add(self, other: Interval) -> Interval {
+        Interval {
+            lo: self.lo.saturating_add(other.lo),
+            hi: self.hi.saturating_add(other.hi),
+        }
+    }
+
+    /// `self - other` (interval subtraction, saturating).
+    fn sub(self, other: Interval) -> Interval {
+        Interval {
+            lo: self.lo.saturating_sub(other.hi),
+            hi: self.hi.saturating_sub(other.lo),
+        }
+    }
+}
+
+/// Lightweight **symbolic-range** propagation of variable values **within a single
+/// command list**: tracks the range each variable can hold via command 122
+/// (Control Variables: set / add / sub / random) while honoring indent dominance.
+/// This underpins: resolution of by-variable transfers (201) / battles (301) —
+/// which use the exact case (`lo == hi`) — and constant-resolvable conditions
+/// (111), which use the full range (`var >= K` is dead when the whole range is
+/// below `K`).
 ///
-/// Dominance: a constant assigned at indent `L` is visible to subsequent
-/// commands while their indent is `>= L`; on leaving the block (indent drops below `L`)
-/// the assignment stops dominating and is removed ([`ConstEnv::prune`]).
-/// Opaque commands (common event call, plugin command, script) may
-/// change any variables outside our visibility — after them the environment is
-/// wholly reset ([`ConstEnv::clear`]). This is deliberately conservative: skipping yields
-/// fewer findings, but not false ones.
+/// Dominance: a value assigned at indent `L` is visible to subsequent commands
+/// while their indent is `>= L`; on leaving the block (indent drops below `L`) the
+/// assignment stops dominating and is removed ([`ConstEnv::prune`]). Opaque
+/// commands (common event call, plugin command, script) may change any variables
+/// outside our visibility — after them the environment is wholly reset
+/// ([`ConstEnv::clear`]). Operations we cannot bound (mul/div/mod, game data)
+/// invalidate the target. This is deliberately conservative: skipping yields fewer
+/// findings, but not false ones.
 #[derive(Default)]
 struct ConstEnv {
-    /// `varId` → (value, indent of the assigning command).
-    vals: HashMap<u32, (i64, i32)>,
+    /// `varId` → (value range, indent of the assigning command).
+    vals: HashMap<u32, (Interval, i32)>,
 }
 
 impl ConstEnv {
-    /// Removes constants assigned at a deeper indent than `indent`
+    /// Removes ranges assigned at a deeper indent than `indent`
     /// (left their block — the assignment no longer dominates the current command).
     fn prune(&mut self, indent: i32) {
         self.vals
@@ -44,8 +88,8 @@ impl ConstEnv {
         self.vals.clear();
     }
 
-    /// Records a known constant value of a variable.
-    fn set(&mut self, var: u32, value: i64, indent: i32) {
+    /// Records a known value range of a variable.
+    fn set(&mut self, var: u32, value: Interval, indent: i32) {
         if var != 0 {
             self.vals.insert(var, (value, indent));
         }
@@ -56,9 +100,79 @@ impl ConstEnv {
         self.vals.remove(&var);
     }
 
-    /// The currently known constant value of a variable.
-    fn get(&self, var: u32) -> Option<i64> {
+    /// The currently known value range of a variable.
+    fn get(&self, var: u32) -> Option<Interval> {
         self.vals.get(&var).map(|&(v, _)| v)
+    }
+
+    /// The currently known **exact** value of a variable (`lo == hi`) — for
+    /// by-variable transfer/battle resolution, which needs a single map/troop id.
+    fn get_exact(&self, var: u32) -> Option<i64> {
+        self.get(var).filter(|iv| iv.lo == iv.hi).map(|iv| iv.lo)
+    }
+}
+
+/// Whether `lhs <op> rhs` is guaranteed over the two ranges: `Some(true)` when it
+/// holds for every pair, `Some(false)` when it holds for no pair, `None` when the
+/// result depends on the concrete values (not statically decidable).
+fn interval_cmp_definite(lhs: Interval, op: CmpOp, rhs: Interval) -> Option<bool> {
+    let disjoint = lhs.hi < rhs.lo || rhs.hi < lhs.lo;
+    let single_equal = lhs.lo == lhs.hi && rhs.lo == rhs.hi && lhs.lo == rhs.lo;
+    match op {
+        CmpOp::Eq => {
+            if single_equal {
+                Some(true)
+            } else if disjoint {
+                Some(false)
+            } else {
+                None
+            }
+        }
+        CmpOp::Ne => {
+            if disjoint {
+                Some(true)
+            } else if single_equal {
+                Some(false)
+            } else {
+                None
+            }
+        }
+        CmpOp::Ge => {
+            if lhs.lo >= rhs.hi {
+                Some(true)
+            } else if lhs.hi < rhs.lo {
+                Some(false)
+            } else {
+                None
+            }
+        }
+        CmpOp::Gt => {
+            if lhs.lo > rhs.hi {
+                Some(true)
+            } else if lhs.hi <= rhs.lo {
+                Some(false)
+            } else {
+                None
+            }
+        }
+        CmpOp::Le => {
+            if lhs.hi <= rhs.lo {
+                Some(true)
+            } else if lhs.lo > rhs.hi {
+                Some(false)
+            } else {
+                None
+            }
+        }
+        CmpOp::Lt => {
+            if lhs.hi < rhs.lo {
+                Some(true)
+            } else if lhs.lo >= rhs.hi {
+                Some(false)
+            } else {
+                None
+            }
+        }
     }
 }
 
@@ -158,6 +272,11 @@ pub struct WalkCtx {
     /// The self-switch scope (`Some` only for map event pages;
     /// `None` for common events and troop pages — there are no self-switches there).
     pub self_switch_scope: Option<SelfSwitchScope>,
+    /// Global switches that must be ON for this command list to run (the page's
+    /// switch conditions / a triggered common event's switch). Attached to every
+    /// `121` ON write as its "gate" for the `circular-gate` rule. Empty means the
+    /// list is not switch-gated (any switch it sets is freely settable).
+    pub gate_switches: Vec<u32>,
 }
 
 impl WalkCtx {
@@ -704,9 +823,10 @@ fn conditional_branch(
     }
 }
 
-/// Attempts to constant-resolve a 111 condition (type 1, variable comparison) against
-/// the current environment. If both the left variable and the right operand are statically
-/// known — computes the result and registers a dead branch.
+/// Attempts to resolve a 111 condition (type 1, variable comparison) against the
+/// current symbolic ranges. If the known range of the left variable and of the
+/// right operand make the comparison always true or always false, registers a
+/// dead branch.
 ///
 /// 111 parameters (type 1): `[1]`=varId, `[2]`=operand type (0 const / 1 variable),
 /// `[3]`=value/srcVarId, `[4]`=comparison operator code.
@@ -723,19 +843,23 @@ fn condition_dead_branch(
     let Some(op) = cmd.as_u64(4).and_then(cmp_op) else {
         return;
     };
-    let operand = match cmd.as_u64(2) {
-        Some(0) => cmd.as_i64(3),
+    let rhs = match cmd.as_u64(2) {
+        Some(0) => cmd.as_i64(3).map(Interval::exact),
         Some(1) => cmd.as_u64(3).and_then(|src| env.get(src as u32)),
         _ => None,
     };
-    let Some(operand) = operand else { return };
-    let result = op.eval(lhs, operand);
+    let Some(rhs) = rhs else { return };
+    let Some(result) = interval_cmp_definite(lhs, op, rhs) else {
+        return;
+    };
     b.add_dead_branch(DeadBranch {
         location: ctx.loc(idx),
         var_id,
-        value: lhs,
+        value_lo: lhs.lo,
+        value_hi: lhs.hi,
         op,
-        operand,
+        operand_lo: rhs.lo,
+        operand_hi: rhs.hi,
         result,
     });
 }
@@ -757,8 +881,18 @@ fn control_switches(b: &mut IrBuilder, ctx: &WalkCtx, cmd: &EventCommand, idx: u
     let set_off = cmd.as_u64(2) == Some(1);
     for id in clamp_id_range(start, end) {
         write_switch(b, ctx, id as u32, idx);
-        if set_off && id != 0 {
-            b.symbols_mut().mark_switch_ever_set_off(id as u32);
+        if id != 0 {
+            if set_off {
+                b.symbols_mut().mark_switch_ever_set_off(id as u32);
+            } else {
+                // An ON write behind the enclosing list's gate — input to
+                // `circular-gate` (progression-deadlock detection).
+                b.add_switch_gate(SwitchGate {
+                    switch_id: id as u32,
+                    gate: ctx.gate_switches.clone(),
+                    location: ctx.loc(idx),
+                });
+            }
         }
     }
 }
@@ -797,22 +931,37 @@ fn control_variables(
         env.clear();
     }
 
-    // Update constant propagation. We support only assignment (operation
-    // == set) by a literal or a constant source variable — everything else
-    // (add/sub/mul/div/mod, random, game-data, script) makes the variable
-    // unknown (conservatively: fewer findings, but not false ones).
-    // [2]=operation (0 = set), [3]=operand type, [4]=operand.
-    let value: Option<i64> = if cmd.as_u64(2).unwrap_or(0) == 0 {
-        match cmd.as_u64(3) {
-            Some(0) | None => cmd.as_i64(4),
-            Some(1) => cmd.as_u64(4).and_then(|src| env.get(src as u32)),
+    // Update symbolic-range propagation. We support set / add / sub with a
+    // literal, a known source variable, or a random min..max range; everything
+    // else (mul/div/mod, game data, script) makes the variable unknown
+    // (conservatively: fewer findings, but not false ones).
+    // [2]=operation (0 set,1 add,2 sub), [3]=operand type
+    // (0 const,1 variable,2 random), [4]=operand ([5]=max for random).
+    let operand_iv: Option<Interval> = match cmd.as_u64(3) {
+        Some(0) | None => cmd.as_i64(4).map(Interval::exact),
+        Some(1) => cmd.as_u64(4).and_then(|src| env.get(src as u32)),
+        Some(2) => match (cmd.as_i64(4), cmd.as_i64(5)) {
+            (Some(a), Some(b)) => Some(Interval::range(a, b)),
             _ => None,
-        }
-    } else {
-        None
+        },
+        _ => None,
     };
+    let operation = cmd.as_u64(2).unwrap_or(0);
     for id in lo..=hi {
-        match value {
+        // add/sub need the target's current range; a missing one → unknown.
+        let new_iv = match operation {
+            0 => operand_iv,
+            1 => match (env.get(id as u32), operand_iv) {
+                (Some(cur), Some(op)) => Some(cur.add(op)),
+                _ => None,
+            },
+            2 => match (env.get(id as u32), operand_iv) {
+                (Some(cur), Some(op)) => Some(cur.sub(op)),
+                _ => None,
+            },
+            _ => None,
+        };
+        match new_iv {
             Some(v) => env.set(id as u32, v, cmd.indent),
             None => env.invalidate(id as u32),
         }
@@ -845,7 +994,7 @@ fn transfer(b: &mut IrBuilder, ctx: &WalkCtx, cmd: &EventCommand, idx: u32, env:
             }
             let to_map = cmd
                 .as_u64(1)
-                .and_then(|v| env.get(v as u32))
+                .and_then(|v| env.get_exact(v as u32))
                 .filter(|&m| m > 0 && m <= u32::MAX as i64)
                 .map(|m| m as u32);
             edge(
@@ -877,7 +1026,10 @@ fn battle(b: &mut IrBuilder, ctx: &WalkCtx, cmd: &EventCommand, idx: u32, env: &
             // we emit a troop reference (`referential-integrity` will check it).
             if let Some(v) = cmd.as_u64(1) {
                 read_var(b, ctx, v as u32, idx);
-                if let Some(troop) = env.get(v as u32).filter(|&t| t > 0 && t <= u32::MAX as i64) {
+                if let Some(troop) = env
+                    .get_exact(v as u32)
+                    .filter(|&t| t > 0 && t <= u32::MAX as i64)
+                {
                     db_ref(b, ctx, DbKind::Troop, troop as u32, idx);
                 }
             }
@@ -990,6 +1142,9 @@ fn script_block(b: &mut IrBuilder, ctx: &WalkCtx, source: &str, idx: u32) {
     let facts = crate::plugins::js::analyze_script(source);
     for id in facts.switch_writes {
         write_switch(b, ctx, id, idx);
+        // The script value is unknown (ON or OFF) — mark the switch as opaquely
+        // written so `circular-gate` treats it as freely settable, not deadlocked.
+        b.mark_switch_script_written(id);
     }
     // Current-event self-switch reads/writes ([this._mapId, this._eventId, 'X']):
     // bound to this event's scope — clears false unreachable/dead-self-switch when a

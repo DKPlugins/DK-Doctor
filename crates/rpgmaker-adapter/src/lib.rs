@@ -140,6 +140,34 @@ mod tests {
                 map_id: 1,
                 event_id: 1,
             }),
+            gate_switches: Vec::new(),
+        };
+        walk(&mut b, &ctx, list);
+        b
+    }
+
+    /// Like [`run`], but the command list executes behind the given global-switch
+    /// activation gate (for `circular-gate` / `SwitchGate` emission tests).
+    fn run_gated(list: &[EventCommand], gate: Vec<u32>) -> IrBuilder {
+        let mut b = Ir::builder(Engine::Mz);
+        let entity = b.push_entity(
+            dk_doctor_core::ir::Entity::Page(dk_doctor_core::ir::Page {
+                conditions: Default::default(),
+                trigger: dk_doctor_core::ir::PageTrigger::Action,
+                command_count: list.len() as u32,
+                commands: Vec::new(),
+            }),
+            dk_doctor_core::ir::Location::file_only("data/Map001.json"),
+        );
+        let ctx = WalkCtx {
+            entity,
+            file: "data/Map001.json".into(),
+            base_path: vec![PathSeg::Map(1), PathSeg::Event(1), PathSeg::Page(1)],
+            self_switch_scope: Some(crate::interpreter::SelfSwitchScope {
+                map_id: 1,
+                event_id: 1,
+            }),
+            gate_switches: gate,
         };
         walk(&mut b, &ctx, list);
         b
@@ -307,9 +335,134 @@ mod tests {
         assert_eq!(ir.dead_branches.len(), 1);
         let db = &ir.dead_branches[0];
         assert_eq!(db.var_id, 1);
-        assert_eq!(db.value, 10);
-        assert_eq!(db.operand, 5);
+        assert_eq!((db.value_lo, db.value_hi), (10, 10));
+        assert_eq!((db.operand_lo, db.operand_hi), (5, 5));
         assert!(!db.result, "10 == 5 ложно");
+    }
+
+    #[test]
+    fn random_range_makes_equality_dead() {
+        // PR-7: 122 var#1 = random 1..3, then 111 "var#1 == 5" → out of range → always false.
+        let list = cmds(vec![
+            json!({"code":122,"indent":0,"parameters":[1,1,0,2,1,3]}),
+            json!({"code":111,"indent":0,"parameters":[1,1,0,5,0]}),
+        ]);
+        let ir = run(&list).finish();
+        assert_eq!(ir.dead_branches.len(), 1);
+        let db = &ir.dead_branches[0];
+        assert_eq!((db.value_lo, db.value_hi), (1, 3));
+        assert!(!db.result, "5 вне диапазона 1..3 → ложно");
+    }
+
+    #[test]
+    fn random_range_undecidable_is_not_flagged() {
+        // Random 1..10, then "var#1 == 5": 5 IS inside the range → not statically
+        // decidable → no dead branch.
+        let list = cmds(vec![
+            json!({"code":122,"indent":0,"parameters":[1,1,0,2,1,10]}),
+            json!({"code":111,"indent":0,"parameters":[1,1,0,5,0]}),
+        ]);
+        let ir = run(&list).finish();
+        assert!(ir.dead_branches.is_empty(), "5 внутри 1..10 → неопределимо");
+    }
+
+    #[test]
+    fn add_shifts_range_out_of_bounds() {
+        // PR-7: var#1 = 3, then += 4 (op 1), then "var#1 < 5" → range [7,7] → always false.
+        let list = cmds(vec![
+            json!({"code":122,"indent":0,"parameters":[1,1,0,0,3]}),
+            json!({"code":122,"indent":0,"parameters":[1,1,1,0,4]}),
+            json!({"code":111,"indent":0,"parameters":[1,1,0,5,4]}),
+        ]);
+        let ir = run(&list).finish();
+        assert_eq!(ir.dead_branches.len(), 1);
+        let db = &ir.dead_branches[0];
+        assert_eq!((db.value_lo, db.value_hi), (7, 7));
+        assert!(!db.result, "7 < 5 ложно");
+    }
+
+    #[test]
+    fn add_to_random_range_resolves_ge() {
+        // random 1..3, then += 10 → [11,13], then "var#1 >= 5" → always true.
+        let list = cmds(vec![
+            json!({"code":122,"indent":0,"parameters":[1,1,0,2,1,3]}),
+            json!({"code":122,"indent":0,"parameters":[1,1,1,0,10]}),
+            json!({"code":111,"indent":0,"parameters":[1,1,0,5,1]}),
+        ]);
+        let ir = run(&list).finish();
+        assert_eq!(ir.dead_branches.len(), 1);
+        let db = &ir.dead_branches[0];
+        assert_eq!((db.value_lo, db.value_hi), (11, 13));
+        assert!(db.result, ">= 5 истинно → мёртвая ветка «иначе»");
+    }
+
+    #[test]
+    fn sub_below_operand_resolves_lt() {
+        // var#1 = 3, then -= 10 (op 2) → [-7,-7], then "var#1 < 0" → always true.
+        let list = cmds(vec![
+            json!({"code":122,"indent":0,"parameters":[1,1,0,0,3]}),
+            json!({"code":122,"indent":0,"parameters":[1,1,2,0,10]}),
+            json!({"code":111,"indent":0,"parameters":[1,1,0,0,4]}),
+        ]);
+        let ir = run(&list).finish();
+        assert_eq!(ir.dead_branches.len(), 1);
+        let db = &ir.dead_branches[0];
+        assert_eq!((db.value_lo, db.value_hi), (-7, -7));
+        assert!(db.result, "-7 < 0 истинно");
+    }
+
+    #[test]
+    fn mul_invalidates_range() {
+        // var#1 = 3, then *= 2 (op 3, unsupported) → range unknown → no dead branch.
+        let list = cmds(vec![
+            json!({"code":122,"indent":0,"parameters":[1,1,0,0,3]}),
+            json!({"code":122,"indent":0,"parameters":[1,1,3,0,2]}),
+            json!({"code":111,"indent":0,"parameters":[1,1,0,100,0]}),
+        ]);
+        let ir = run(&list).finish();
+        assert!(ir.dead_branches.is_empty(), "умножение гасит диапазон");
+    }
+
+    #[test]
+    fn add_with_unknown_current_invalidates() {
+        // += 4 on a variable with no known prior value → unknown, no dead branch.
+        let list = cmds(vec![
+            json!({"code":122,"indent":0,"parameters":[1,1,1,0,4]}),
+            json!({"code":111,"indent":0,"parameters":[1,1,0,5,4]}),
+        ]);
+        let ir = run(&list).finish();
+        assert!(
+            ir.dead_branches.is_empty(),
+            "нет исходного значения → неизвестно"
+        );
+    }
+
+    #[test]
+    fn switch_on_emits_gate_with_page_switches() {
+        // PR-8: 121 sets switch #7 ON behind gate {3}. A SwitchGate is emitted.
+        let list = cmds(vec![json!({"code":121,"indent":0,"parameters":[7,7,0]})]);
+        let ir = run_gated(&list, vec![3]).finish();
+        assert_eq!(ir.switch_gates.len(), 1);
+        assert_eq!(ir.switch_gates[0].switch_id, 7);
+        assert_eq!(ir.switch_gates[0].gate, vec![3]);
+    }
+
+    #[test]
+    fn switch_off_emits_no_gate() {
+        // 121 OFF (value 1) does not "provide" the switch → no SwitchGate, but marks ever_set_off.
+        let list = cmds(vec![json!({"code":121,"indent":0,"parameters":[7,7,1]})]);
+        let ir = run_gated(&list, vec![3]).finish();
+        assert!(ir.switch_gates.is_empty(), "OFF-запись не даёт SwitchGate");
+        assert!(ir.symbols.switches.get(&7).unwrap().ever_set_off);
+    }
+
+    #[test]
+    fn ungated_switch_on_emits_empty_gate() {
+        // Set ON with no activation gate → empty gate = freely settable.
+        let list = cmds(vec![json!({"code":121,"indent":0,"parameters":[7,7,0]})]);
+        let ir = run_gated(&list, Vec::new()).finish();
+        assert_eq!(ir.switch_gates.len(), 1);
+        assert!(ir.switch_gates[0].gate.is_empty());
     }
 
     #[test]

@@ -287,8 +287,10 @@ fn each_planted_rule_fires_exactly() {
         &impossible[0].message,
         Msg::ImpossibleCondition {
             var_id: 1,
-            value: 10,
-            operand: 5,
+            value_lo: 10,
+            value_hi: 10,
+            operand_lo: 5,
+            operand_hi: 5,
             result: false,
             ..
         }

@@ -16,7 +16,7 @@ pub use ir::{
     DatabaseRecord, DbKind, DeadBranch, Edge, EdgeRecord, Engine, Entity, EntityId, EntityNode,
     Event, Ir, IrBuilder, Location, LocationPath, Map, MethodPatch, Page, PageConditions, PathSeg,
     PluginCommand, PluginCommandCall, PluginMeta, PluginOrderDeps, ScriptBlackbox, Site,
-    SymbolInfo, SymbolTable, TransferDesignation, Troop, VehicleKind, VehicleStartMap,
+    SwitchGate, SymbolInfo, SymbolTable, TransferDesignation, Troop, VehicleKind, VehicleStartMap,
 };
 pub use message::{
     Chrome, Lang, LoadErrorKind, Msg, PluginOrderTag, SymbolKind, render, render_chrome,
@@ -156,7 +156,7 @@ mod tests {
     fn registry_has_all_builtin_rules() {
         let reg = Registry::with_builtin();
         let ids: Vec<&str> = reg.rule_ids().collect();
-        assert_eq!(ids.len(), 20);
+        assert_eq!(ids.len(), 21);
         assert!(ids.contains(&"dead-variables"));
         assert!(ids.contains(&"uninitialized-symbols"));
         assert!(ids.contains(&"broken-transfer"));
@@ -177,6 +177,7 @@ mod tests {
         assert!(ids.contains(&"unknown-plugin-command"));
         assert!(ids.contains(&"plugin-conflict"));
         assert!(ids.contains(&"vehicle-start-map"));
+        assert!(ids.contains(&"circular-gate"));
     }
 
     #[test]

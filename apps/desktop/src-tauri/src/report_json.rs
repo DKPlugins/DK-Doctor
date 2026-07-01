@@ -33,6 +33,9 @@ struct Finding<'a> {
     severity: dk_doctor_core::Severity,
     category: dk_doctor_core::Category,
     confidence: dk_doctor_core::Confidence,
+    /// Stable, language-neutral fingerprint (rule + file + path + args). Kept in
+    /// sync with the CLI so the run-diff and CLI baselines agree on identity.
+    fingerprint: String,
     file: &'a camino::Utf8Path,
     path: String,
     /// Stable message key (language-neutral), for example `"orphan_asset"`.
@@ -75,6 +78,7 @@ fn message_key(msg: &Msg) -> &'static str {
         Msg::UnknownPluginCommand { .. } => "unknown_plugin_command",
         Msg::PluginConflict { .. } => "plugin_conflict",
         Msg::ImpossibleCondition { .. } => "impossible_condition",
+        Msg::CircularGate { .. } => "circular_gate",
     }
 }
 
@@ -88,6 +92,7 @@ pub fn render(report: &Report, engine: &str, lang: Lang) -> String {
             severity: f.severity,
             category: f.category,
             confidence: f.confidence,
+            fingerprint: f.fingerprint(),
             file: &f.location.file,
             path: f.location.path.to_string(),
             message_key: message_key(&f.message),

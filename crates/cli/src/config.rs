@@ -99,6 +99,8 @@ pub struct FileConfig {
     pub orphans: bool,
     /// Enable the opt-in `dead-common-event` rule.
     pub dead_common_events: bool,
+    /// Enable the opt-in `circular-gate` rule (progression-deadlock prototype).
+    pub circular_gates: bool,
     /// Baseline file path (relative to the project root) for `fail_on = "new"`.
     pub baseline: Option<String>,
     /// Documented suppressions (TOML `[[suppress]]`).
