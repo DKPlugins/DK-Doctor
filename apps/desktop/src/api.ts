@@ -418,7 +418,7 @@ export async function checkUpdate(current: string): Promise<UpdateInfo | null> {
   }
 }
 
-/** Opens the release link in the system browser (via the backend). */
-export async function openRelease(url: string): Promise<void> {
+/** Opens an external https URL in the system browser (via the backend guard). */
+export async function openUrl(url: string): Promise<void> {
   await invoke("open_url", { url });
 }

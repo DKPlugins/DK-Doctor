@@ -38,6 +38,7 @@ import {
 import { icon } from "./icons";
 import type { RecentProject, Settings } from "./store";
 import { cmdName, relTime, sevLabel, t } from "./i18n";
+import { buildFeedback } from "./feedback";
 
 /** Application view. */
 export type AppView = "welcome" | "scanning" | "report" | "error";
@@ -63,6 +64,12 @@ export interface State {
   ignored: Set<number>;
   /** Index of the finding open in the drawer, or null. */
   drawer: number | null;
+  /** Whether the drawer is showing the "why hide?" reason chooser. */
+  hidePrompt: boolean;
+  /** App version (for feedback payloads); undefined until resolved. */
+  appVersion?: string;
+  /** Share overlay scope: a finding index (false-positive) or null (whole report). */
+  shareFinding: number | null;
   recent: RecentProject[];
   /** Available update (if the check found a new version). */
   update?: UpdateInfo;
@@ -78,8 +85,8 @@ export interface State {
   atlas?: MapAtlas[];
   /** Map-transition graph sidecar (undefined until loaded; failure keeps it unset). */
   graph?: MapGraph;
-  /** Open overlay modal (release readiness / time machine / export), or null. */
-  overlay: null | "readiness" | "timeline" | "export";
+  /** Open overlay modal (release readiness / time machine / export / share), or null. */
+  overlay: null | "readiness" | "timeline" | "export" | "share";
   /** Run history of the open project for the Time Machine (loaded on scan). */
   history?: RunHistoryPoint[];
   /** Selected atlas target: a map id, the project board, the overview, or null. */
@@ -633,6 +640,7 @@ export function reportHTML(s: State): string {
     `<button class="iconbtn" data-act="open-timeline" title="${esc(t(lang, "timelineTitle"))}" aria-label="${esc(t(lang, "timelineTitle"))}">${icon("history")}</button>` +
     `<button class="btn btn--ghost btn--md" data-act="open-readiness">${icon("clipboard-check")} ${esc(t(lang, "readyTitle"))}</button>` +
     `<button class="iconbtn" data-act="rerun" title="${esc(t(lang, "rerun"))}" aria-label="${esc(t(lang, "rerun"))}">${icon("refresh-cw")}</button>` +
+    `<button class="btn btn--ghost btn--md" data-act="open-share" title="${esc(t(lang, "shareTip"))}">${icon("megaphone")} ${esc(t(lang, "share"))}</button>` +
     `<button class="btn btn--secondary btn--md" data-act="open-export">${icon("download")} ${esc(t(lang, "export"))}</button>`;
   // Two rows: project + actions on top, view-mode + grouping below — keeps the
   // Export button on-screen on narrow windows instead of overflowing one row.
@@ -1203,12 +1211,21 @@ export function drawerHTML(s: State): string {
   const docsBtn = rem?.docs_url
     ? `<button class="btn btn--secondary btn--md" data-act="open-docs" data-doc="${esc(rem.docs_url)}">${icon("file-text")} ${esc(t(lang, "dDocs"))}</button>`
     : "";
-  const foot =
-    '<div class="drawer__foot">' +
-    `<button class="btn btn--secondary btn--md" data-act="copy">${icon("copy")} ${esc(t(lang, "copyPath"))}</button>` +
-    docsBtn +
-    '<span class="grow"></span>' +
-    `<button class="iconbtn" data-act="ignore" title="${esc(t(lang, "ignore"))}" aria-label="${esc(t(lang, "ignore"))}">${icon("eye-off")}</button></div>`;
+  // The hide button opens a reason chooser (see drawerAction); picking "false
+  // positive" then offers to send feedback.
+  const foot = s.hidePrompt
+    ? '<div class="drawer__foot drawer__foot--why">' +
+      `<span class="whylabel">${esc(t(lang, "hideWhy"))}</span>` +
+      '<span class="grow"></span>' +
+      `<button class="btn btn--secondary btn--md" data-hide="fixed">${esc(t(lang, "hideFixed"))}</button>` +
+      `<button class="btn btn--secondary btn--md" data-hide="false-positive">${esc(t(lang, "hideFalsePos"))}</button>` +
+      `<button class="btn btn--secondary btn--md" data-hide="other">${esc(t(lang, "hideOther"))}</button></div>`
+    : '<div class="drawer__foot">' +
+      `<button class="btn btn--secondary btn--md" data-act="copy">${icon("copy")} ${esc(t(lang, "copyPath"))}</button>` +
+      docsBtn +
+      `<button class="btn btn--ghost btn--md" data-act="report-fp">${icon("megaphone")} ${esc(t(lang, "reportFp"))}</button>` +
+      '<span class="grow"></span>' +
+      `<button class="iconbtn" data-act="ignore" title="${esc(t(lang, "ignore"))}" aria-label="${esc(t(lang, "ignore"))}">${icon("eye-off")}</button></div>`;
 
   return head + body + foot;
 }
@@ -1398,6 +1415,49 @@ function exportBody(s: State): string {
   );
 }
 
+/**
+ * Single source of the share payload: the preview textarea and the clipboard
+ * copy (main.ts) both call this, so they can never diverge.
+ */
+export function sharePayload(s: State): string {
+  if (!s.report) return "";
+  return buildFeedback({
+    report: s.report,
+    version: s.appVersion ?? "?",
+    lang: s.lang,
+    finding: s.shareFinding,
+    ignored: s.ignored,
+    warnings: s.warnings,
+  });
+}
+
+/** Share/feedback body: privacy disclosure + exact-payload preview + steps. */
+function shareBody(s: State): string {
+  const lang = s.lang;
+  const fp = s.shareFinding != null;
+  const payload = sharePayload(s);
+  const li = (ic: string, text: string) => `<li>${icon(ic)}<span>${esc(text)}</span></li>`;
+  const intro = fp ? t(lang, "shareIntroFp") : t(lang, "shareIntroAll");
+  const sent =
+    `<div class="share__col share__col--ok"><span class="share__ct">${icon("shield")} ${esc(t(lang, "shareSentTitle"))}</span>` +
+    `<ul class="share__list">${li("check", t(lang, "shareSent1"))}${li("check", t(lang, "shareSent2"))}</ul></div>`;
+  const notSent =
+    `<div class="share__col share__col--no"><span class="share__ct">${icon("eye-off")} ${esc(t(lang, "shareNotTitle"))}</span>` +
+    `<ul class="share__list">${li("x", t(lang, "shareNot1"))}${li("x", t(lang, "shareNot2"))}${li("x", t(lang, "shareNot3"))}</ul></div>`;
+  return (
+    `<div class="share">` +
+    `<p class="share__intro">${esc(intro)}</p>` +
+    `<div class="share__cols">${sent}${notSent}</div>` +
+    `<span class="share__pt">${esc(t(lang, "sharePreview"))}</span>` +
+    `<textarea class="share__preview" readonly rows="8" aria-label="${esc(t(lang, "sharePreview"))}">${esc(payload)}</textarea>` +
+    `<div class="share__steps">` +
+    `<button class="btn btn--secondary btn--md" data-act="share-copy">${icon("copy")} ${esc(t(lang, "shareCopy"))}</button>` +
+    `<button class="btn btn--primary btn--md" data-act="share-open">${icon("send")} ${esc(t(lang, "shareOpen"))}</button></div>` +
+    `<p class="share__hint">${icon("info")} ${esc(t(lang, "shareHint"))}</p>` +
+    `</div>`
+  );
+}
+
 /** Renders the open overlay modal (or "" when none). */
 export function overlayHTML(s: State): string {
   if (!s.overlay || !s.report) return "";
@@ -1406,5 +1466,7 @@ export function overlayHTML(s: State): string {
     return overlayShell(lang, t(lang, "readyTitle"), "clipboard-check", readinessBody(s));
   if (s.overlay === "timeline")
     return overlayShell(lang, t(lang, "timelineTitle"), "history", timelineBody(s));
+  if (s.overlay === "share")
+    return overlayShell(lang, t(lang, "shareTitle"), "megaphone", shareBody(s));
   return overlayShell(lang, t(lang, "exportTitle"), "download", exportBody(s));
 }

@@ -13,7 +13,7 @@ import {
   mapGraph,
   mapRender,
   onProjectChanged,
-  openRelease,
+  openUrl,
   pickFolder,
   saveImagePng,
   saveTextFile,
@@ -24,6 +24,7 @@ import {
 } from "./api";
 import type { MapRender } from "./api";
 import { buildReportHtml } from "./exportHtml";
+import { FEEDBACK_ISSUE_URL } from "./feedback";
 import { renderSummaryCard } from "./summaryCard";
 import { composeMap, composeRegions, disposeTileset, loadTileset } from "./tileset";
 import { buildEventSprites } from "./sprites";
@@ -54,6 +55,7 @@ import {
   resolveAtlasSel,
   scanShellHTML,
   settingsHTML,
+  sharePayload,
   type State,
   updateBarHTML,
   welcomeHTML,
@@ -107,6 +109,8 @@ const state: State = {
   expanded: new Set(),
   ignored: new Set(),
   drawer: null,
+  hidePrompt: false,
+  shareFinding: null,
   recent: loadRecent(),
   newOnly: false,
   reportMode: "atlas",
@@ -413,6 +417,7 @@ function openOverlay(kind: "readiness" | "timeline" | "export"): void {
 }
 function closeOverlay(): void {
   state.overlay = null;
+  state.shareFinding = null;
   syncOverlay();
 }
 
@@ -502,10 +507,12 @@ async function loadDrawerContext(): Promise<void> {
 function openDrawer(i: number): void {
   if (!state.report || !state.report.findings[i]) return;
   state.drawer = i;
+  state.hidePrompt = false;
   syncDrawer();
 }
 function closeDrawer(): void {
   state.drawer = null;
+  state.hidePrompt = false;
   syncDrawer();
 }
 function navDrawer(dir: number): void {
@@ -564,10 +571,19 @@ function renderUpdateBar(): void {
   updateBarEl.classList.toggle("is-on", !!state.update);
 }
 
+/** Resolves the app version once for feedback payloads (best-effort). */
+async function loadAppVersion(): Promise<void> {
+  try {
+    state.appVersion = await getVersion();
+  } catch {
+    /* version is cosmetic in the payload; ignore failures */
+  }
+}
+
 async function maybeCheckUpdate(): Promise<void> {
   if (!state.settings.checkUpdates) return;
   try {
-    const version = await getVersion();
+    const version = state.appVersion ?? (await getVersion());
     const info: UpdateInfo | null = await checkUpdate(version);
     if (info) {
       state.update = info;
@@ -818,21 +834,66 @@ function drawerAction(act: string): void {
   if (!f) return;
   if (act === "copy") {
     const text = f.path ? `${f.file} ${f.path}` : f.file;
-    const clip = navigator.clipboard;
-    if (clip) {
-      clip
-        .writeText(text)
-        .then(() => toast(t(state.lang, "copied")))
-        .catch(() => toast(t(state.lang, "copyFailed")));
-    } else {
-      toast(t(state.lang, "copyFailed"));
-    }
+    void copyText(text).then((ok) => {
+      if (ok) toast(t(state.lang, "copied"));
+    });
   } else if (act === "ignore") {
-    state.ignored.add(state.drawer);
-    closeDrawer();
-    renderReportView();
-    toast(t(state.lang, "ignored"));
+    // Open the reason chooser instead of hiding straight away.
+    state.hidePrompt = true;
+    syncDrawer();
+  } else if (act === "report-fp") {
+    openShare(state.drawer);
   }
+}
+
+/**
+ * Hides the drawer's finding with a reason. A "false-positive" reason then
+ * offers to send feedback (the share overlay, scoped to this finding).
+ */
+function hideWithReason(reason: string): void {
+  if (state.drawer === null) return;
+  const idx = state.drawer;
+  state.ignored.add(idx);
+  closeDrawer();
+  renderReportView();
+  toast(t(state.lang, "ignored"));
+  if (reason === "false-positive") openShare(idx);
+}
+
+/** Opens the share/feedback overlay, scoped to a finding (or null = whole report). */
+function openShare(finding: number | null): void {
+  if (!state.report) return;
+  if (state.drawer !== null) closeDrawer();
+  state.shareFinding = finding;
+  state.overlay = "share";
+  syncOverlay();
+}
+
+/** Writes `text` to the clipboard; toasts copyFailed and resolves false on failure. */
+async function copyText(text: string): Promise<boolean> {
+  const clip = navigator.clipboard;
+  if (!clip) {
+    toast(t(state.lang, "copyFailed"));
+    return false;
+  }
+  try {
+    await clip.writeText(text);
+    return true;
+  } catch {
+    toast(t(state.lang, "copyFailed"));
+    return false;
+  }
+}
+
+/** Step 1: copy to clipboard and confirm. */
+async function shareCopy(): Promise<void> {
+  if (await copyText(sharePayload(state))) toast(t(state.lang, "shareCopied"));
+}
+
+/** Step 2: copy, then open GitHub — only when the clipboard actually got filled,
+ *  so the user never lands on the issue page with nothing to paste. */
+async function shareOpen(): Promise<void> {
+  if (await copyText(sharePayload(state))) await openUrl(FEEDBACK_ISSUE_URL);
 }
 
 function doExport(): void {
@@ -1044,16 +1105,26 @@ document.addEventListener("click", (e) => {
         break;
       case "copy":
       case "ignore":
+      case "report-fp":
         drawerAction(act);
         break;
+      case "open-share":
+        openShare(null);
+        break;
+      case "share-copy":
+        void shareCopy();
+        break;
+      case "share-open":
+        void shareOpen();
+        break;
       case "open-docs":
-        if (actEl.dataset.doc) void openRelease(actEl.dataset.doc);
+        if (actEl.dataset.doc) void openUrl(actEl.dataset.doc);
         break;
       case "clear-recent":
         clearRecentList();
         break;
       case "get-update":
-        if (state.update) void openRelease(state.update.url);
+        if (state.update) void openUrl(state.update.url);
         break;
       case "dismiss-update":
         state.update = undefined;
@@ -1128,6 +1199,12 @@ document.addEventListener("click", (e) => {
   const exBtn = target.closest<HTMLElement>("[data-export]");
   if (exBtn) {
     exportAs(exBtn.dataset.export!);
+    return;
+  }
+  // hide-reason chooser (in the drawer)
+  const hideBtn = target.closest<HTMLElement>("[data-hide]");
+  if (hideBtn) {
+    hideWithReason(hideBtn.dataset.hide!);
     return;
   }
   const treeTog = target.closest<HTMLElement>("[data-treetoggle]");
@@ -1255,5 +1332,7 @@ try {
   /* outside Tauri the window is already visible */
 }
 
-// Unobtrusive update check on startup (if enabled in the settings).
-void maybeCheckUpdate();
+// Resolve the app version once (used in feedback payloads), then run the
+// unobtrusive update check that reuses it — chained so getVersion() is a
+// single IPC call per launch.
+void loadAppVersion().then(maybeCheckUpdate);
