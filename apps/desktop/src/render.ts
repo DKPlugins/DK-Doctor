@@ -14,6 +14,7 @@ import type {
 import { computeHealth } from "./health";
 import { computeReadiness, type GateStatus, type Verdict } from "./readiness";
 import { scoreSparklineSVG } from "./timeline";
+import { CHANGELOG, type ChangelogKind } from "./changelog";
 import { graphIsRenderable, graphStats, renderMapGraph } from "./mapgraph";
 import type { RunHistoryPoint } from "./store";
 import {
@@ -85,8 +86,8 @@ export interface State {
   atlas?: MapAtlas[];
   /** Map-transition graph sidecar (undefined until loaded; failure keeps it unset). */
   graph?: MapGraph;
-  /** Open overlay modal (release readiness / time machine / export / share), or null. */
-  overlay: null | "readiness" | "timeline" | "export" | "share";
+  /** Open overlay modal (release readiness / time machine / export / share / changelog), or null. */
+  overlay: null | "readiness" | "timeline" | "export" | "share" | "changelog";
   /** Run history of the open project for the Time Machine (loaded on scan). */
   history?: RunHistoryPoint[];
   /** Selected atlas target: a map id, the project board, the overview, or null. */
@@ -1288,7 +1289,8 @@ export function settingsHTML(s: State): string {
     `<div class="settings__field"><span class="settings__label">${esc(t(lang, "secData"))}</span>` +
     `<button class="btn btn--secondary btn--md" data-act="clear-recent">${icon("trash-2")} ${esc(t(lang, "recentClear"))}</button></div>` +
     // about
-    `<div class="settings__about"><span class="v">v${esc(s.appVersion ?? "0.2.0")}</span></div>` +
+    `<div class="settings__about"><span class="v">v${esc(s.appVersion ?? "0.2.0")}</span>` +
+    `<button class="btn btn--ghost btn--sm" data-act="open-changelog">${icon("sparkles")} ${esc(t(lang, "changelog"))}</button></div>` +
     "</div>"
   );
 }
@@ -1455,9 +1457,55 @@ function shareBody(s: State): string {
   );
 }
 
+/** Renders backtick spans in changelog text as `<code>`; everything else escaped. */
+function changelogInline(raw: string): string {
+  return raw
+    .split(/(`[^`]+`)/g)
+    .map((seg) =>
+      seg.length >= 2 && seg.startsWith("`") && seg.endsWith("`")
+        ? `<code class="changelog__code">${esc(seg.slice(1, -1))}</code>`
+        : esc(seg),
+    )
+    .join("");
+}
+
+/** Changelog body: list of releases (newest first), items tinted by kind. */
+function changelogBody(s: State): string {
+  const lang = s.lang;
+  const dotCls: Record<ChangelogKind, string> = {
+    feat: "changelog__dot--feat",
+    fix: "changelog__dot--fix",
+    other: "changelog__dot--other",
+  };
+  const releases = CHANGELOG.map((rel) => {
+    const items = rel.items
+      .map((it) => {
+        const pr = it.pr != null ? `<span class="changelog__pr">#${it.pr}</span>` : "";
+        return (
+          `<li class="changelog__item changelog__item--${it.kind}">` +
+          `<span class="changelog__dot ${dotCls[it.kind]}"></span>` +
+          `<span class="changelog__tx">${changelogInline(it.text)}</span>${pr}</li>`
+        );
+      })
+      .join("");
+    const cur = rel.current ? `<span class="changelog__cur">${esc(t(lang, "changelogCurrent"))}</span>` : "";
+    const summary = rel.summary ? `<p class="changelog__summary">${esc(rel.summary)}</p>` : "";
+    return (
+      `<section class="changelog__release${rel.current ? " is-current" : ""}">` +
+      `<div class="changelog__head"><span class="changelog__ver">v${esc(rel.version)}</span>` +
+      `<span class="changelog__date">${esc(rel.date)}</span>${cur}</div>` +
+      summary +
+      `<ul class="changelog__items">${items}</ul></section>`
+    );
+  }).join("");
+  return `<div class="changelog">${releases}</div>`;
+}
+
 /** Renders the open overlay modal (or "" when none). */
 export function overlayHTML(s: State): string {
-  if (!s.overlay || !s.report) return "";
+  // Changelog is the only overlay available without an open report (it opens
+  // from Settings → About, which is reachable on the welcome screen too).
+  if (!s.overlay || (!s.report && s.overlay !== "changelog")) return "";
   const lang = s.lang;
   if (s.overlay === "readiness")
     return overlayShell(lang, t(lang, "readyTitle"), "clipboard-check", readinessBody(s));
@@ -1465,5 +1513,7 @@ export function overlayHTML(s: State): string {
     return overlayShell(lang, t(lang, "timelineTitle"), "history", timelineBody(s));
   if (s.overlay === "share")
     return overlayShell(lang, t(lang, "shareTitle"), "megaphone", shareBody(s));
+  if (s.overlay === "changelog")
+    return overlayShell(lang, t(lang, "changelogTitle"), "sparkles", changelogBody(s));
   return overlayShell(lang, t(lang, "exportTitle"), "download", exportBody(s));
 }

@@ -3222,9 +3222,106 @@ svg {
 .overlaycard__body {
   padding: 18px;
   display: flex;
+  flex: 1;
+  min-height: 0;
   flex-direction: column;
   gap: 14px;
   overflow-y: auto;
+}
+
+/* --- Changelog overlay --- */
+.changelog {
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+}
+.changelog__release {
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  background: var(--surface-sunken);
+  padding: 13px 15px;
+}
+.changelog__release.is-current {
+  border-color: var(--brand);
+}
+.changelog__head {
+  display: flex;
+  align-items: baseline;
+  gap: 10px;
+}
+.changelog__ver {
+  font: var(--weight-semibold) var(--text-title)/1 var(--font-sans);
+  color: var(--text);
+}
+.changelog__date {
+  font: var(--weight-medium) var(--text-xs)/1 var(--font-mono);
+  color: var(--text-muted);
+}
+.changelog__cur {
+  margin-left: auto;
+  font: var(--weight-medium) var(--text-xs)/1 var(--font-sans);
+  color: var(--text-on-brand);
+  background: var(--brand);
+  padding: 3px 8px;
+  border-radius: var(--radius-full);
+}
+.changelog__summary {
+  margin: 8px 0 0;
+  font: var(--weight-medium) var(--text-sm)/1.45 var(--font-sans);
+  color: var(--text-secondary);
+}
+.changelog__items {
+  list-style: none;
+  margin: 9px 0 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 7px;
+}
+.changelog__item {
+  display: flex;
+  align-items: flex-start;
+  gap: 9px;
+  font: var(--text-sm)/1.5 var(--font-sans);
+  color: var(--text-secondary);
+  min-width: 0;
+}
+.changelog__dot {
+  flex: none;
+  width: 7px;
+  height: 7px;
+  margin-top: 7px;
+  border-radius: var(--radius-full);
+  background: var(--text-muted);
+}
+.changelog__dot--feat {
+  background: var(--brand);
+}
+.changelog__dot--fix {
+  background: var(--sev-ok);
+}
+.changelog__dot--other {
+  background: var(--text-muted);
+}
+.changelog__tx {
+  flex: 1;
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+.changelog__code {
+  font-family: var(--font-mono);
+  font-size: 0.86em;
+  padding: 1px 4px;
+  border-radius: var(--radius-xs);
+  background: var(--surface-raised);
+  border: 1px solid var(--border-faint);
+  color: var(--text);
+  word-break: break-word;
+}
+.changelog__pr {
+  flex: none;
+  font: var(--weight-medium) var(--text-xs)/1 var(--font-mono);
+  color: var(--text-faint);
 }
 
 /* --- Release readiness (D4) --- */

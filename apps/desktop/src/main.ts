@@ -397,7 +397,8 @@ function setReportMode(mode: "atlas" | "list" | "graph"): void {
 // --- Overlay modals (readiness / timeline / export) ------------------------
 /** Shows/hides the overlay modal based on `state.overlay`. */
 function syncOverlay(): void {
-  const open = state.overlay !== null && state.view === "report";
+  // Changelog is reachable without an open report (it opens from Settings → About).
+  const open = state.overlay !== null && (state.view === "report" || state.overlay === "changelog");
   if (open) {
     overlayEl.innerHTML = overlayHTML(state);
     overlayEl.classList.add("is-open");
@@ -407,8 +408,8 @@ function syncOverlay(): void {
     overlayScrimEl.classList.remove("is-on");
   }
 }
-function openOverlay(kind: "readiness" | "timeline" | "export"): void {
-  if (!state.report) return;
+function openOverlay(kind: "readiness" | "timeline" | "export" | "changelog"): void {
+  if (!state.report && kind !== "changelog") return;
   if (kind === "timeline" && state.project) {
     state.history = loadHistory(state.project.path);
   }
@@ -1108,6 +1109,9 @@ document.addEventListener("click", (e) => {
         break;
       case "open-timeline":
         openOverlay("timeline");
+        break;
+      case "open-changelog":
+        openOverlay("changelog");
         break;
       case "close-overlay":
         closeOverlay();
