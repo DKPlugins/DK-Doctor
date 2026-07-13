@@ -32,6 +32,7 @@ use dk_doctor_core::ir::{
     AssetKey, AssetKind, DbKind, Edge, Entity, EntityId, IrBuilder, Location, PathSeg,
     PluginCommand, PluginOrderDeps, PluginRef,
 };
+use std::collections::HashSet;
 
 /// Built-in profiles (compiled in). File name == plugin `name`.
 const BUILTIN_PROFILES: &[&str] = &[
@@ -349,13 +350,42 @@ fn load_profiles(project_root: &Utf8Path, warns: &mut Vec<String>) -> Vec<Profil
 /// (the parameter value is the author's explicit declaration, and `unreachable-maps`
 /// is INFO). Writes the facts into existing hooks (`plugin_provided_assets`/
 /// `assets_present`/`plugin_referenced_maps`/symbols/edges/`plugin_meta`).
-pub fn apply(
+/// Trusted-input entry point for unit tests (the legacy signature).
+#[cfg(test)]
+fn apply(
     b: &mut IrBuilder,
     project_root: &Utf8Path,
     plugins_js: &Utf8Path,
     plugins: &[crate::plugins::PluginParams],
     warns: &mut Vec<String>,
 ) {
+    apply_with_options(b, project_root, plugins_js, plugins, warns, true)
+}
+
+/// Same as `apply` but with an explicit trust flag for the project's `.dk-doctor/`
+/// declarations.
+///
+/// When `trust_project_decls` is `false`, the entire `.dk-doctor/` directory (its
+/// `config.toml` ignore-globs/localization and the curated `plugins/*.toml`
+/// profiles) is ignored. Those files live inside the analyzed project and so are
+/// attacker-controlled under the untrusted-input threat model: a profile can
+/// mark switch/variable ids as `declared_by_plugin`, assets as
+/// `plugin_provided_assets`, and arbitrary plugin commands as registered, which
+/// would hide `uninitialized-symbols`/`stuck-autorun`/`broken-assets`/
+/// `unknown-plugin-command` findings. CI scanning a third-party project opts out
+/// via the CLI `--no-project-config` flag.
+pub(crate) fn apply_with_options(
+    b: &mut IrBuilder,
+    project_root: &Utf8Path,
+    plugins_js: &Utf8Path,
+    plugins: &[crate::plugins::PluginParams],
+    warns: &mut Vec<String>,
+    trust_project_decls: bool,
+) {
+    if !trust_project_decls {
+        // Untrusted project: do not consult its `.dk-doctor/` declarations at all.
+        return;
+    }
     let config: DkConfig = read_toml(
         &project_root.join(".dk-doctor").join("config.toml"),
         "config",
@@ -636,9 +666,15 @@ fn apply_curated_tables(
         if !profile.dependency.is_empty() {
             let dep = &profile.dependency;
             let meta = b.plugin_meta_mut();
+            // O(1) membership via a side set rather than `Vec::contains` (linear per
+            // element → O(n²) on a crafted profile with many unique dep entries).
             let extend_unique = |dst: &mut Vec<String>, src: &[String]| {
+                if src.is_empty() {
+                    return;
+                }
+                let mut seen: HashSet<String> = dst.iter().cloned().collect();
                 for s in src {
-                    if !dst.contains(s) {
+                    if seen.insert(s.clone()) {
                         dst.push(s.clone());
                     }
                 }

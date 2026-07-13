@@ -457,6 +457,13 @@ pub fn map_graph(root: &Utf8Path) -> Result<MapGraph, crate::AdapterError> {
     }
 
     // Collect edges (deduped) + dynamic-exit counts by scanning each map.
+    //
+    // Bounded: a single crafted map with N distinct Transfer-Player commands to
+    // nonexistent map ids would otherwise grow `edge_set` without limit and, on
+    // the desktop side, blow past the node cap via the "missing target" band.
+    // Past `MAP_GRAPH_MAX_EDGES` we stop accepting new edges (the graph is
+    // already past what the renderer can show usefully).
+    const MAP_GRAPH_MAX_EDGES: usize = 20_000;
     let mut edge_set: std::collections::BTreeSet<(u32, u32)> = std::collections::BTreeSet::new();
     let mut dynamic: std::collections::HashMap<u32, u32> = std::collections::HashMap::new();
     for &id in &ids {
@@ -482,6 +489,7 @@ pub fn map_graph(root: &Utf8Path) -> Result<MapGraph, crate::AdapterError> {
                         Some(0) | None => {
                             if let Some(to) = target
                                 && to > 0
+                                && edge_set.len() < MAP_GRAPH_MAX_EDGES
                             {
                                 edge_set.insert((id, to as u32));
                             }

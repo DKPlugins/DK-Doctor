@@ -995,8 +995,20 @@ async function startWatch(): Promise<void> {
     }
     watchUnlisten = unlisten;
     await watchProject(path);
-    // A toggle-off / re-arm that happened while awaiting invalidates us.
-    if (token !== watchToken) stopWatch();
+    // A toggle-off / re-arm that happened while awaiting invalidates us. Do NOT
+    // call the global stopWatch() here: a newer startWatch (B) may already have
+    // installed its own listener into `watchUnlisten` and its own backend watcher
+    // via watchProject — the global teardown would kill B's watcher and leave the
+    // UI preference enabled with no active watcher. Only undo OUR listener, and
+    // only if we still own the global slot.
+    if (token !== watchToken) {
+      if (watchUnlisten === unlisten) {
+        unlisten();
+        watchUnlisten = null;
+        void unwatchProject().catch(() => {});
+      }
+      return;
+    }
   } catch {
     /* watch unavailable (outside Tauri / permission) — the toggle is a no-op */
   }

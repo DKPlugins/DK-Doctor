@@ -129,20 +129,41 @@ impl Rule for CircularGate {
         // minimum (the representative).
         let mut cand_sorted: Vec<u32> = candidates.iter().copied().collect();
         cand_sorted.sort_unstable();
-        let mut visited: FxHashSet<u32> = FxHashSet::default();
+        // Dense index per candidate for the array-based SCC pass.
+        let id_to_idx: FxHashMap<u32, usize> = cand_sorted
+            .iter()
+            .enumerate()
+            .map(|(i, &s)| (s, i))
+            .collect();
+        let n = cand_sorted.len();
+        let mut adj: Vec<Vec<usize>> = vec![Vec::new(); n];
+        for (i, &s) in cand_sorted.iter().enumerate() {
+            if let Some(succ) = graph.get(&s) {
+                for &t in succ {
+                    if let Some(&j) = id_to_idx.get(&t) {
+                        adj[i].push(j);
+                    }
+                }
+            }
+        }
+        // Iterative Tarjan SCC (O(V+E)), replacing a per-pair `reaches` DFS that
+        // was O(C²·(V+E)) — up to O(C⁴) on a crafted dense block graph — and so
+        // could hang the analyzer on attacker-controlled event data. Iterative to
+        // avoid stack overflow on large candidate graphs.
+        let sccs = strongly_connected_components(&adj);
+
         let mut findings = Vec::new();
-        for &s in &cand_sorted {
-            if visited.contains(&s) || !reaches(&graph, s, s) {
+        for comp in sccs {
+            if comp.is_empty() {
                 continue;
             }
-            let cycle: Vec<u32> = cand_sorted
-                .iter()
-                .copied()
-                .filter(|&t| t == s || (reaches(&graph, s, t) && reaches(&graph, t, s)))
-                .collect();
-            for &t in &cycle {
-                visited.insert(t);
+            // A switch is on a cycle iff its SCC has size ≥ 2 or it has a self-edge.
+            let cyclic = comp.len() > 1 || adj[comp[0]].iter().any(|&w| w == comp[0]);
+            if !cyclic {
+                continue;
             }
+            let mut cycle: Vec<u32> = comp.iter().map(|&ix| cand_sorted[ix]).collect();
+            cycle.sort_unstable();
             let rep = cycle[0];
             let location = setters[&rep]
                 .first()
@@ -172,26 +193,91 @@ impl Rule for CircularGate {
                 rule: "circular-gate",
             });
         }
+        // Stable order: by representative switch id (deterministic regardless of
+        // the SCC enumeration order).
+        findings.sort_by_key(|f| match &f.message {
+            Msg::CircularGate { switch_id, .. } => *switch_id,
+            _ => 0,
+        });
         findings
     }
 }
 
-/// Whether `to` is reachable from `from` in the block graph following ≥1 edge
-/// (so `reaches(g, s, s)` is true only when `s` lies on a cycle).
-fn reaches(graph: &FxHashMap<u32, FxHashSet<u32>>, from: u32, to: u32) -> bool {
-    let mut stack: Vec<u32> = graph.get(&from).into_iter().flatten().copied().collect();
-    let mut seen = FxHashSet::default();
-    while let Some(n) = stack.pop() {
-        if n == to {
-            return true;
+/// Iterative Tarjan strongly-connected-components over a dense-indexed graph
+/// (`adj[i]` = successors of node `i`). Returns one `Vec` per SCC. O(V+E) time
+/// and memory; iterative to avoid recursion-depth limits on large inputs.
+fn strongly_connected_components(adj: &[Vec<usize>]) -> Vec<Vec<usize>> {
+    let n = adj.len();
+    let mut idx = vec![u32::MAX; n];
+    let mut low = vec![0u32; n];
+    let mut on_stack = vec![false; n];
+    let mut started = vec![false; n];
+    let mut stack: Vec<usize> = Vec::new();
+    let mut sccs: Vec<Vec<usize>> = Vec::new();
+    // DFS work stack: (node, next-successor-index-to-process).
+    let mut work: Vec<(usize, usize)> = Vec::new();
+    let mut counter = 0u32;
+
+    for root in 0..n {
+        if idx[root] != u32::MAX {
+            continue;
         }
-        if seen.insert(n)
-            && let Some(next) = graph.get(&n)
-        {
-            stack.extend(next.iter().copied());
+        work.push((root, 0));
+        while let Some((v, pos)) = work.pop() {
+            if !started[v] {
+                started[v] = true;
+                idx[v] = counter;
+                low[v] = counter;
+                counter += 1;
+                stack.push(v);
+                on_stack[v] = true;
+            }
+            let succs = &adj[v];
+            let mut p = pos;
+            let mut recurse = None;
+            while p < succs.len() {
+                let w = succs[p];
+                if idx[w] == u32::MAX {
+                    recurse = Some(p);
+                    break;
+                } else if on_stack[w] {
+                    if idx[w] < low[v] {
+                        low[v] = idx[w];
+                    }
+                    p += 1;
+                } else {
+                    p += 1;
+                }
+            }
+            if let Some(rp) = recurse {
+                // Suspend v right after the child we are about to descend into.
+                let w = succs[rp];
+                work.push((v, rp + 1));
+                work.push((w, 0));
+                continue;
+            }
+            // All successors processed: finalize v.
+            if low[v] == idx[v] {
+                let mut comp = Vec::new();
+                loop {
+                    let w = stack.pop().unwrap();
+                    on_stack[w] = false;
+                    comp.push(w);
+                    if w == v {
+                        break;
+                    }
+                }
+                sccs.push(comp);
+            }
+            // Propagate v's lowlink to its parent (now on top of the work stack).
+            if let Some(&(parent, _)) = work.last()
+                && low[v] < low[parent]
+            {
+                low[parent] = low[v];
+            }
         }
     }
-    false
+    sccs
 }
 
 #[cfg(test)]
@@ -318,5 +404,23 @@ mod tests {
         let f = CircularGate.run(&RuleCtx::new(&ir));
         assert_eq!(f.len(), 1);
         assert_eq!(cycle_ids(&f[0]), vec![1, 2, 3]);
+    }
+
+    #[test]
+    fn large_cycle_completes_without_quadratic_blowup() {
+        // A single large ring of N mutually-gating switches (i→i+1, wrap). This
+        // used to call `reaches()` O(C²) times (each a fresh DFS), hanging on a
+        // crafted switch-gate cycle. With the iterative Tarjan SCC pass it is
+        // O(V+E) and finishes instantly. Regression for the circular-gate DoS.
+        const N: u32 = 4_000;
+        let mut b = Ir::builder(Engine::Mz);
+        for s in 1..=N {
+            let next = if s == N { 1 } else { s + 1 };
+            gate(&mut b, s, vec![next]);
+        }
+        let ir = b.finish();
+        let f = CircularGate.run(&RuleCtx::new(&ir));
+        assert_eq!(f.len(), 1, "one cluster for the whole ring");
+        assert_eq!(cycle_ids(&f[0]).len(), N as usize);
     }
 }

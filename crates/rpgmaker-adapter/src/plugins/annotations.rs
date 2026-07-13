@@ -94,6 +94,13 @@ fn strip_id_suffix(s: &str) -> &str {
 /// (ends with `switcher`, not `switch`) and `"SwitchActorText"` (the token is a
 /// prefix, not the tail), the two false-positive traps seen in the corpus.
 /// Common-event is checked first — its suffixes are disjoint from the others.
+///
+/// Retained for tests and as a documented building block, but **no longer used to
+/// suppress findings**: the parameter name and value both come from the analyzed
+/// project, so trusting a name suffix to mark an id plugin-managed let a hostile
+/// project hide `uninitialized-symbols`/`stuck-autorun`/`dead-common-event`
+/// findings. Only an explicit `@type switch`/`variable`/`common_event` suppresses.
+#[allow(dead_code)]
 pub fn infer_symbol_from_name(name: &str) -> Option<InferredKind> {
     let lower = name.trim().to_ascii_lowercase();
     let base = strip_id_suffix(&lower);

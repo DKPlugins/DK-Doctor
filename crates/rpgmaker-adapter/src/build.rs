@@ -79,8 +79,17 @@ fn read_to_string(path: &Utf8Path) -> Option<String> {
     std::fs::read_to_string(path.as_std_path()).ok()
 }
 
+/// Trusted-input entry point for unit tests (the legacy single-argument form).
+#[cfg(test)]
+fn build(root: &Utf8Path) -> Result<(Ir, LoadWarnings), crate::AdapterError> {
+    build_with_options(root, &crate::LoadOptions::default())
+}
+
 /// Main entry point for building IR from an already-determined data root.
-pub fn build(root: &Utf8Path) -> Result<(Ir, LoadWarnings), crate::AdapterError> {
+pub(crate) fn build_with_options(
+    root: &Utf8Path,
+    opts: &crate::LoadOptions,
+) -> Result<(Ir, LoadWarnings), crate::AdapterError> {
     let Some(layout) = detect_layout(root) else {
         return Err(crate::AdapterError::ProjectNotFound(root.to_string()));
     };
@@ -175,13 +184,15 @@ pub fn build(root: &Utf8Path) -> Result<(Ir, LoadWarnings), crate::AdapterError>
 
     // Profiles + `.dk-doctor`: post-processing of facts (asset_roots/localization,
     // ignore globs, map_param, and the curated per-plugin param/command/dependency
-    // tables). Runs ALWAYS (ignore globs work even without plugins).
-    crate::profiles::apply(
+    // tables). Skipped in untrusted mode (the project's `.dk-doctor/` is
+    // attacker-controlled and can suppress findings).
+    crate::profiles::apply_with_options(
         &mut b,
         &layout.base,
         &plugins_js,
         &plugins,
         &mut warns.messages,
+        opts.trust_project_decls,
     );
 
     Ok((b.finish(), warns))

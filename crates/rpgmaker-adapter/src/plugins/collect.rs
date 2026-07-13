@@ -10,11 +10,14 @@
 //!  - `@type <db>` (`common_event`/`state`/`actor`/… + `[]`) → DB record ids →
 //!    `Edge::ReferencesDbId` on a lazy [`Entity::Plugin`] (catches
 //!    `referential-integrity`; for `common_event` it also rescues `dead-common-event`);
-//!  - **untyped** params (no `@type`, common on MV) → name-alias inference
-//!    ([`annotations::infer_symbol_from_name`]): a `…Switch`/`…Variable` name →
-//!    `mark_*_declared_by_plugin`, a `…Common Event` name → `add_reserved_common_event`
-//!    (rescues `dead-common-event`). Suppression only — no finding is emitted, so a
-//!    misfire costs at most a missed diagnostic, never a false alarm;
+//!  - **untyped** params (no `@type`, common on MV) → NOT used to suppress
+//!    findings. Name-suffix inference was applied historically, but both the
+//!    parameter name (header) and value (`plugins.js`) are attacker-controlled,
+//!    so trusting a `…Switch`/`…Variable`/`…Common Event` suffix would let a
+//!    hostile project forge `@param Gate Switch = 42` to silence
+//!    `uninitialized-symbols`/`stuck-autorun`/`dead-common-event`. Only an
+//!    explicit `@type` (above) is trusted to suppress; see
+//!    [`annotations::infer_symbol_from_name`] for the (now unused) suffix rules;
 //!  - `@command` → command registry; `@base`/`@orderAfter`/`@orderBefore` →
 //!    order declarations — both go into [`PluginMeta`].
 //!
@@ -134,21 +137,44 @@ fn asset_name(value: &str) -> String {
     }
 }
 
+/// Upper bound on a single `struct<…>` parameter payload. Struct parameters carry
+/// a handful of plugin-managed symbol fields; anything larger is either abuse or a
+/// mistake, and this path only suppresses false positives — a miss costs at most a
+/// lost diagnostic, never a missed bug.
+const MAX_STRUCT_PAYLOAD_BYTES: usize = 1 << 20; // 1 MiB
+
+/// Upper bound on the number of decoded struct objects retained. Bounding the
+/// retained `Vec` (and the per-element JSON parse) keeps a crafted large array
+/// from exhausting memory/CPU before the caller reads the few fields it needs.
+const MAX_STRUCT_ELEMENTS: usize = 1024;
+
 /// Decodes a `@type struct<…>` value into its JSON objects.
 ///
 /// Scalar: `'{"switchId":"5"}'` → one object. Array: the double-encoded
 /// `'["{…}","{…}"]'` form (each element is itself a JSON object string).
 /// Tolerant — anything that does not parse yields no objects (this path only
 /// suppresses false positives, so a miss costs at most a lost diagnostic).
+///
+/// Bounded: payloads above [`MAX_STRUCT_PAYLOAD_BYTES`] and arrays beyond
+/// [`MAX_STRUCT_ELEMENTS`] are truncated/skipped so an attacker-controlled
+/// `plugins.js` cannot exhaust memory by supplying a huge struct array.
 fn decode_struct_objects(
     value: &str,
     is_array: bool,
 ) -> Vec<serde_json::Map<String, serde_json::Value>> {
+    if value.len() > MAX_STRUCT_PAYLOAD_BYTES {
+        return Vec::new();
+    }
     let mut out = Vec::new();
     if is_array {
         if let Ok(arr) = serde_json::from_str::<Vec<String>>(value) {
-            for s in arr {
-                if let Ok(serde_json::Value::Object(m)) = serde_json::from_str(&s) {
+            for s in arr.into_iter().take(MAX_STRUCT_ELEMENTS) {
+                if s.len() > MAX_STRUCT_PAYLOAD_BYTES {
+                    continue;
+                }
+                if let Ok(serde_json::Value::Object(m)) = serde_json::from_str(&s)
+                    && out.len() < MAX_STRUCT_ELEMENTS
+                {
                     out.push(m);
                 }
             }
@@ -160,11 +186,17 @@ fn decode_struct_objects(
 }
 
 /// Marks the switch/variable/common-event fields of one decoded struct object as
-/// plugin-managed (suppression-only, like the top-level params): a typed
-/// `@type switch/variable/common_event` field, or an untyped `…Switch`/`…Variable`/
-/// `…Common Event`-named one, contributes its id(s). Db/file/nested-struct fields
-/// are intentionally skipped — emitting findings from struct fields is the
-/// false-positive minefield we avoid.
+/// plugin-managed (suppression-only, like the top-level params): only a **typed**
+/// `@type switch/variable/common_event` field contributes its id(s). Db/file/
+/// nested-struct fields are intentionally skipped — emitting findings from struct
+/// fields is the false-positive minefield we avoid.
+///
+/// Untyped name-suffix inference is intentionally NOT applied here (nor at the
+/// top level): both the field name and value come from the analyzed project, so
+/// trusting a `…Switch` header line to mark an id as plugin-managed lets a
+/// malicious project suppress `uninitialized-symbols`/`stuck-autorun`/
+/// `dead-common-event` findings. An explicit `@type` is an editor-gated signal,
+/// a name suffix is not.
 fn mark_struct_symbol_fields(
     b: &mut IrBuilder,
     fields: &[ParamSchema],
@@ -175,7 +207,6 @@ fn mark_struct_symbol_fields(
             ParamType::Switch => Some(InferredKind::Switch),
             ParamType::Variable => Some(InferredKind::Variable),
             ParamType::Db(DbKind::CommonEvent) => Some(InferredKind::CommonEvent),
-            _ if !field.has_explicit_type => annotations::infer_symbol_from_name(&field.name),
             _ => None,
         };
         let Some(kind) = kind else { continue };
@@ -305,32 +336,18 @@ pub fn collect(
                     }
                 }
                 ParamType::Other => {
-                    // No recognized `@type`. On MV the editor never writes one, so
-                    // fall back to name-alias inference (suffix-only): a `…Switch`/
-                    // `…Variable`/`…Common Event` parameter names a symbol/CE id.
-                    // Skipped when an explicit (but unrecognized) `@type` is present
-                    // — `@type boolean` on a `…Switch` param is a toggle, not an id.
-                    //
-                    // Inference only ever SUPPRESSES a false positive (marks the
-                    // symbol/CE as plugin-managed); it emits no finding, so a wrong
-                    // guess costs a missed diagnostic, never a false alarm. Ids are
-                    // decoded list-tolerantly (scalar, JSON array, or comma/space
-                    // list as seen in MV plugins).
-                    if !param.has_explicit_type
-                        && let Some(kind) = annotations::infer_symbol_from_name(&param.name)
-                    {
-                        for id in decode_ids(value, true) {
-                            match kind {
-                                InferredKind::Switch => {
-                                    b.symbols_mut().mark_switch_declared_by_plugin(id);
-                                }
-                                InferredKind::Variable => {
-                                    b.symbols_mut().mark_variable_declared_by_plugin(id);
-                                }
-                                InferredKind::CommonEvent => b.add_reserved_common_event(id),
-                            }
-                        }
-                    }
+                    // No recognized `@type`. Name-suffix inference (`…Switch`/
+                    // `…Variable`/`…Common Event` → plugin-managed id) was applied
+                    // here historically but is now intentionally NOT used: both the
+                    // parameter name (plugin header) and the id value (`plugins.js`
+                    // `parameters`) come from the analyzed project, so a malicious
+                    // project could forge e.g. `@param Gate Switch` = `42` to mark
+                    // switch 42 as plugin-managed and silence `uninitialized-symbols`/
+                    // `stuck-autorun`. Only an explicit `@type switch`/`variable`/
+                    // `common_event` (handled in the branches above) is trusted to
+                    // suppress, because that is an editor-gated declaration. See
+                    // [`annotations::infer_symbol_from_name`] for the suffix rules.
+                    let _ = value;
                 }
             }
         }
@@ -377,14 +394,20 @@ pub fn collect(
             b.add_reserved_common_event(id);
         }
 
-        // Assets loaded at runtime with a literal name (ImageManager.load*/
-        // AudioManager.play*) → plugin-managed: not broken, not orphan. Normalize
-        // the literal the same way on-disk files are (strip extension/encryption/
-        // bracket prefix) so the key matches the scanned assets_present entry.
+        // Assets merely **referenced** at runtime via a literal name
+        // (`ImageManager.loadPicture("X")` / `AudioManager.playSe({name:"Y"})`)
+        // are NOT promoted to `plugin_provided_assets`: that set also suppresses
+        // `broken-assets`, and a literal call does not make a missing file present
+        // (the call would still crash). They only rescue the asset from
+        // `orphan-assets`, via the separate `runtime_loaded_assets` set. This
+        // blocks a hostile enabled plugin from hiding a broken-asset finding by
+        // embedding `ImageManager.loadPicture("MissingPic")`. The literal is
+        // normalized the same way on-disk files are (strip extension/encryption/
+        // bracket prefix) so the key matches the scanned `assets_present` entry.
         for (kind, name) in facts.provided_assets {
             let norm = crate::assets::normalize_filename(&name);
             if !norm.is_empty() {
-                b.add_plugin_provided_asset(AssetKey::new(kind, norm));
+                b.add_runtime_loaded_asset(AssetKey::new(kind, norm));
             }
         }
 
@@ -600,9 +623,13 @@ mod tests {
     }
 
     #[test]
-    fn collect_infers_untyped_suffix_params() {
-        // MV-style plugin: params carry NO @type. Name-alias inference must treat
-        // `…Switch`/`…Variable` as declared symbols and `…Common Event` as reserved.
+    fn collect_does_not_infer_untyped_suffix_params() {
+        // MV-style params carry NO @type. Name-suffix inference used to mark
+        // `…Switch`/`…Variable`/`…Common Event` as plugin-managed, but the param
+        // name *and* value come from the analyzed project, so a hostile project
+        // could forge them to suppress `uninitialized-symbols`/`stuck-autorun`/
+        // `dead-common-event`. Inference is now disabled — only an explicit
+        // `@type` suppresses.
         let tmp = std::env::temp_dir().join(format!("dkplugininfer{}", std::process::id()));
         let _ = std::fs::create_dir_all(&tmp);
         let src = r#"/*:
@@ -641,29 +668,34 @@ mod tests {
         collect(&mut b, &[entry], &dir, pjs, &mut warns);
         let ir = b.finish();
 
-        // Switch / variable → declared by plugin (suppresses uninitialized).
-        // Covers scalar (7), comma list (29,30) and JSON array (21,22) decoding.
-        assert!(ir.symbols.switches.get(&7).unwrap().declared_by_plugin);
-        assert!(ir.symbols.switches.get(&29).unwrap().declared_by_plugin);
-        assert!(ir.symbols.switches.get(&30).unwrap().declared_by_plugin);
-        assert!(ir.symbols.switches.get(&21).unwrap().declared_by_plugin);
-        assert!(ir.symbols.switches.get(&22).unwrap().declared_by_plugin);
-        assert!(ir.symbols.variables.get(&3).unwrap().declared_by_plugin);
-        // Value 0 = "none" → no entry created.
+        // Security: name-suffix inference from attacker-controlled (header, value)
+        // pairs no longer marks symbols as plugin-managed. A hostile project must
+        // not be able to forge `@param Gate Switch = 42` to silence
+        // `uninitialized-symbols`/`stuck-autorun`. Only an explicit `@type`
+        // (absent here — there is no plugin header file) suppresses, so none of
+        // these untyped params are marked, regardless of their suffix.
+        for id in [7u32, 29, 30, 21, 22, 9, 11] {
+            assert!(
+                !ir.symbols
+                    .switches
+                    .get(&id)
+                    .is_some_and(|i| i.declared_by_plugin),
+                "untyped switch param {id} must not be marked declared_by_plugin"
+            );
+        }
+        for id in [3u32, 11] {
+            assert!(
+                !ir.symbols
+                    .variables
+                    .get(&id)
+                    .is_some_and(|i| i.declared_by_plugin),
+                "untyped variable param {id} must not be marked declared_by_plugin"
+            );
+        }
+        // Common-event inference is likewise gone → nothing reserved.
         assert!(
-            !ir.symbols.switches.contains_key(&0),
-            "0 = none, не помечается"
-        );
-        // Common event → reserved (rescues dead-common-event).
-        assert!(ir.reserved_common_events.contains(&5));
-        // Negative controls: explicit @type boolean and "Switcher" are NOT inferred.
-        assert!(
-            !ir.symbols.switches.contains_key(&9),
-            "@type boolean не выводится"
-        );
-        assert!(
-            !ir.symbols.switches.contains_key(&11) && !ir.symbols.variables.contains_key(&11),
-            "'Switcher' — не суффикс 'Switch'"
+            !ir.reserved_common_events.contains(&5),
+            "untyped common-event param must not reserve a CE"
         );
         // Inference emits no DB-ref edges (pure suppression, no findings).
         assert!(
@@ -726,8 +758,16 @@ mod tests {
         assert!(ir.symbols.switches.get(&20).unwrap().declared_by_plugin);
         // Typed common_event field → reserved (rescues dead-common-event).
         assert!(ir.reserved_common_events.contains(&7));
-        // Untyped "Extra Variable" field → name-inferred variable → declared.
-        assert!(ir.symbols.variables.get(&4).unwrap().declared_by_plugin);
+        // Security: the UNTYPED "Extra Variable" field is NOT marked — name-suffix
+        // inference inside struct fields could otherwise be forged from the project
+        // to suppress `uninitialized-symbols`/`stuck-autorun`.
+        assert!(
+            !ir.symbols
+                .variables
+                .get(&4)
+                .is_some_and(|i| i.declared_by_plugin),
+            "untyped struct field must not be marked declared_by_plugin"
+        );
         // Suppression only: struct fields emit no referential-integrity edges.
         assert!(
             !ir.edges
@@ -767,14 +807,24 @@ mod tests {
         let pjs = camino::Utf8Path::new("js/plugins.js");
         collect(&mut b, &[entry], &dir, pjs, &mut warns);
         let ir = b.finish();
+        // Security: a literal runtime load is recorded as merely *referenced*
+        // (runtime_loaded_assets), NOT as plugin-provided. The latter would also
+        // suppress `broken-assets`, letting a hostile plugin hide a missing file
+        // by embedding `ImageManager.loadPicture("MissingPic")`. Runtime loads
+        // only rescue the asset from `orphan-assets`.
         assert!(
-            ir.plugin_provided_assets
+            ir.runtime_loaded_assets
                 .contains(&AssetKey::new(AssetKind::Picture, "Splash")),
             "extension stripped to match on-disk key"
         );
         assert!(
-            ir.plugin_provided_assets
+            ir.runtime_loaded_assets
                 .contains(&AssetKey::new(AssetKind::Se, "Cursor"))
+        );
+        assert!(
+            !ir.plugin_provided_assets
+                .contains(&AssetKey::new(AssetKind::Picture, "Splash")),
+            "runtime load must not be promoted to plugin_provided_assets"
         );
         let _ = std::fs::remove_dir_all(&tmp);
     }

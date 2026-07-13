@@ -71,6 +71,49 @@ impl AdapterError {
     }
 }
 
+/// Knobs that change how aggressively the analyzed project's own declarations
+/// are trusted.
+///
+/// Under the untrusted-input threat model (CI scanning a third-party game), a
+/// project's `.dk-doctor/` directory and `.dk-doctor.toml` are attacker-controlled
+/// and can suppress findings. [`LoadOptions::trusted`] is the default (the
+/// project is the author's own); pass [`LoadOptions::untrusted`] for CI on
+/// third-party projects — it is wired up by the CLI `--no-project-config` flag.
+#[derive(Debug, Clone, Copy)]
+pub struct LoadOptions {
+    /// Whether to honor the project's `.dk-doctor/` declarations (curated plugin
+    /// profiles, `config.toml` ignore-globs/localization). When `false`, they are
+    /// ignored entirely so a hostile project cannot hide findings.
+    pub trust_project_decls: bool,
+}
+
+impl Default for LoadOptions {
+    fn default() -> Self {
+        Self {
+            trust_project_decls: true,
+        }
+    }
+}
+
+impl LoadOptions {
+    /// Author mode: the project is the operator's own — honor `.dk-doctor/` and
+    /// `.dk-doctor.toml` (default).
+    pub const fn trusted() -> Self {
+        Self {
+            trust_project_decls: true,
+        }
+    }
+
+    /// CI mode: the project is a third-party / untrusted input — ignore its
+    /// `.dk-doctor/` and `.dk-doctor.toml` so it cannot hide findings or bypass
+    /// the gate.
+    pub const fn untrusted() -> Self {
+        Self {
+            trust_project_decls: false,
+        }
+    }
+}
+
 /// Loads an RPG Maker project from the root folder and builds [`Ir`].
 ///
 /// Tries the root itself, then `www/`. Parses `System.json`, the database,
@@ -78,7 +121,13 @@ impl AdapterError {
 /// edges and symbol sites; scans asset folders. Parse errors in individual
 /// files are not fatal — they are skipped, the project is built from what is available.
 pub fn load_project(root: &Utf8Path) -> Result<Ir, AdapterError> {
-    let (ir, _warnings) = build::build(root)?;
+    load_project_with_options(root, &LoadOptions::default())
+}
+
+/// Like [`load_project`] but with explicit [`LoadOptions`] (e.g. untrusted-input
+/// mode for CI on third-party projects).
+pub fn load_project_with_options(root: &Utf8Path, opts: &LoadOptions) -> Result<Ir, AdapterError> {
+    let (ir, _warnings) = build::build_with_options(root, opts)?;
     Ok(ir)
 }
 
@@ -88,7 +137,15 @@ pub fn load_project(root: &Utf8Path) -> Result<Ir, AdapterError> {
 /// The CLI and desktop surface these so the user knows the report may be
 /// incomplete (e.g. a corrupt `MapXXX.json`), instead of silently dropping them.
 pub fn load_project_with_warnings(root: &Utf8Path) -> Result<(Ir, Vec<String>), AdapterError> {
-    let (ir, warnings) = build::build(root)?;
+    load_project_with_warnings_options(root, &LoadOptions::default())
+}
+
+/// Like [`load_project_with_warnings`] but with explicit [`LoadOptions`].
+pub fn load_project_with_warnings_options(
+    root: &Utf8Path,
+    opts: &LoadOptions,
+) -> Result<(Ir, Vec<String>), AdapterError> {
+    let (ir, warnings) = build::build_with_options(root, opts)?;
     Ok((ir, warnings.messages))
 }
 
@@ -1151,16 +1208,20 @@ var $plugins =
     #[test]
     fn collect_text_var_ids_cases() {
         use crate::interpreter::collect_text_var_ids;
+        use std::collections::HashSet;
         let mut out = Vec::new();
-        collect_text_var_ids(r"HP: \v[7] / \V[8]", &mut out);
+        let mut seen = HashSet::new();
+        collect_text_var_ids(r"HP: \v[7] / \V[8]", &mut out, &mut seen);
         assert_eq!(out, vec![7, 8], "both \\v and \\V, case-insensitive");
 
         out.clear();
-        collect_text_var_ids(r"\v[3] then \v[3] again", &mut out);
+        seen.clear();
+        collect_text_var_ids(r"\v[3] then \v[3] again", &mut out, &mut seen);
         assert_eq!(out, vec![3], "de-duplicated within one string");
 
         out.clear();
-        collect_text_var_ids(r"\v[\v[3]]", &mut out);
+        seen.clear();
+        collect_text_var_ids(r"\v[\v[3]]", &mut out, &mut seen);
         assert_eq!(
             out,
             vec![3],
@@ -1168,7 +1229,8 @@ var $plugins =
         );
 
         out.clear();
-        collect_text_var_ids(r"\v[0] \v[] \vx plain", &mut out);
+        seen.clear();
+        collect_text_var_ids(r"\v[0] \v[] \vx plain", &mut out, &mut seen);
         assert!(out.is_empty(), "id 0 / malformed escapes ignored");
     }
 
