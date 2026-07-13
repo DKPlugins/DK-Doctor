@@ -112,6 +112,118 @@ fn config_suppress_removes_a_finding_by_fingerprint() {
     let _ = std::fs::remove_file(cfg.as_std_path());
 }
 
+/// Recursively copies a fixture directory (used to plant a project-local
+/// `.dk-doctor.toml` without mutating the shared `testdata/` fixture).
+fn copy_dir_recursive(src: &std::path::Path, dst: &std::path::Path) -> std::io::Result<()> {
+    std::fs::create_dir_all(dst)?;
+    for entry in std::fs::read_dir(src)? {
+        let entry = entry?;
+        let path = entry.path();
+        let name = entry.file_name();
+        let target = dst.join(&name);
+        let ft = entry.file_type()?;
+        if ft.is_dir() {
+            copy_dir_recursive(&path, &target)?;
+        } else if ft.is_file() {
+            std::fs::copy(&path, &target)?;
+        }
+    }
+    Ok(())
+}
+
+/// The shared fixture path (absolute).
+fn fixture_path() -> std::path::PathBuf {
+    camino::Utf8PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("..")
+        .join("..")
+        .join("testdata")
+        .join("mz-fixture")
+        .into_std_path_buf()
+}
+
+/// Spawns a temp copy of the MZ fixture so a project-local `.dk-doctor.toml` (or
+/// `.dk-doctor/` dir) can be planted without touching the shared fixture.
+fn fixture_copy(tag: &str) -> camino::Utf8PathBuf {
+    let dst = std::env::temp_dir().join(format!("dkdoc-nc-{tag}-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dst);
+    copy_dir_recursive(&fixture_path(), &dst).expect("fixture copy");
+    camino::Utf8PathBuf::from_path_buf(dst).unwrap()
+}
+
+#[test]
+fn no_project_config_ignores_project_local_suppressions() {
+    // Threat model (#1): a malicious project ships `.dk-doctor.toml` with
+    // `fail_on = "never"` and `[[suppress]]` entries for its own findings to make
+    // the analyzer exit 0. Without `--no-project-config`, the auto-loaded project
+    // config is honored (exit 0). With it, the config is ignored and the real
+    // severity-based exit code (2, errors present) is restored.
+    let project = fixture_copy("suppress");
+
+    // First grab a real fingerprint to suppress.
+    let json = run_stdout(&["--format", "json", project.as_str()]);
+    let fp = first_fingerprint(&json);
+
+    // Plant a hostile project config: fail_on never + suppress one fingerprint.
+    std::fs::write(
+        project.join(".dk-doctor.toml").as_std_path(),
+        format!("fail_on = \"never\"\n[[suppress]]\nfingerprint = \"{fp}\"\nreason = \"hide\"\n",),
+    )
+    .unwrap();
+
+    // Without the flag: config wins → exit 0 despite errors.
+    assert_eq!(
+        run(&[project.as_str()]),
+        0,
+        "project-local fail_on=never suppresses the gate (the vulnerability)"
+    );
+
+    // With --no-project-config: project config ignored → legacy severity exit
+    // code (2, there are errors) and the suppressed finding is back.
+    assert_eq!(
+        run(&["--no-project-config", project.as_str()]),
+        2,
+        "--no-project-config ignores the hostile config"
+    );
+    let json2 = run_stdout(&["--no-project-config", "--format", "json", project.as_str()]);
+    assert!(
+        json2.contains(&fp),
+        "the suppressed fingerprint reappears under --no-project-config"
+    );
+
+    let _ = std::fs::remove_dir_all(project.as_std_path());
+}
+
+#[test]
+fn no_project_config_ignores_project_local_disable() {
+    // A hostile project disables a noisy error rule via `.dk-doctor.toml`. Without
+    // `--no-project-config` the rule is muted; with it, the rule runs again.
+    let project = fixture_copy("disable");
+    std::fs::write(
+        project.join(".dk-doctor.toml").as_std_path(),
+        "disable = [\"referential-integrity\"]\n",
+    )
+    .unwrap();
+
+    // referential-integrity normally contributes 5 errors on this fixture. With
+    // the project config disabling it, the JSON report has no such finding.
+    let muted = run_stdout(&["--format", "json", project.as_str()]);
+    let muted_count = muted.matches("referential-integrity").count();
+    assert_eq!(
+        muted_count, 0,
+        "project-local disable mutes the rule (the vulnerability)"
+    );
+
+    // With --no-project-config the disable is ignored → the rule fires again.
+    let restored = run_stdout(&["--no-project-config", "--format", "json", project.as_str()]);
+    let restored_count = restored.matches("referential-integrity").count();
+    assert!(
+        restored_count >= 5,
+        "--no-project-config restores the disabled rule ({restored_count} findings)"
+    );
+
+    let _ = std::fs::remove_dir_all(project.as_std_path());
+}
+
 #[test]
 fn fail_on_new_without_baseline_treats_all_as_new() {
     // With no baseline file, every finding is "new" → the gate trips.

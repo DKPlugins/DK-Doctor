@@ -14,7 +14,7 @@ use args::{Args, Format, resolve_lang};
 use clap::Parser;
 use config::{FailOn, FileConfig};
 use dk_doctor_core::{Chrome, Engine, Registry, Report, RuleCtx, Severity, render_chrome};
-use dk_doctor_rpgmaker::load_project_with_warnings;
+use dk_doctor_rpgmaker::{LoadOptions, load_project_with_warnings_options};
 use std::collections::HashSet;
 use std::process::ExitCode;
 
@@ -57,21 +57,30 @@ fn main() -> ExitCode {
     let args = Args::parse();
     let lang = resolve_lang(args.lang);
 
-    // Load the project config (explicit --config, else <project>/.dk-doctor.toml).
-    let (cfg_path, explicit) = match &args.config {
-        Some(p) => (p.clone(), true),
-        None => (args.project.join(".dk-doctor.toml"), false),
+    // Load the project config. With --no-project-config the project's own
+    // `.dk-doctor.toml` is treated as attacker-controlled and ignored (it can
+    // otherwise set `fail_on = "never"`, disable rules, or suppress findings to
+    // bypass the CI gate). An explicit operator-supplied `--config PATH` is
+    // always honored.
+    let (cfg_path, explicit, auto_load_disabled) = match (&args.config, args.no_project_config) {
+        (Some(p), _) => (p.clone(), true, false),
+        (None, false) => (args.project.join(".dk-doctor.toml"), false, false),
+        (None, true) => (args.project.join(".dk-doctor.toml"), false, true),
     };
-    let cfg = match FileConfig::load(&cfg_path) {
-        Ok(Some(c)) => c,
-        Ok(None) if explicit => {
-            eprintln!("dk-doctor: config not found: {cfg_path}");
-            return ExitCode::from(2);
-        }
-        Ok(None) => FileConfig::default(),
-        Err(e) => {
-            eprintln!("dk-doctor: config error: {e}");
-            return ExitCode::from(2);
+    let cfg = if auto_load_disabled {
+        FileConfig::default()
+    } else {
+        match FileConfig::load(&cfg_path) {
+            Ok(Some(c)) => c,
+            Ok(None) if explicit => {
+                eprintln!("dk-doctor: config not found: {cfg_path}");
+                return ExitCode::from(2);
+            }
+            Ok(None) => FileConfig::default(),
+            Err(e) => {
+                eprintln!("dk-doctor: config error: {e}");
+                return ExitCode::from(2);
+            }
         }
     };
 
@@ -96,7 +105,12 @@ fn main() -> ExitCode {
         }
     }
 
-    let (ir, load_warnings) = match load_project_with_warnings(&args.project) {
+    let load_opts = if args.no_project_config {
+        LoadOptions::untrusted()
+    } else {
+        LoadOptions::default()
+    };
+    let (ir, load_warnings) = match load_project_with_warnings_options(&args.project, &load_opts) {
         Ok(pair) => pair,
         Err(e) => {
             let (kind, detail) = e.to_load_error();

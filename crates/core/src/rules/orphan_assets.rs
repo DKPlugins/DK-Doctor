@@ -45,10 +45,14 @@ impl Rule for OrphanAssets {
             .iter()
             .filter(|key| {
                 // effects/ — transitive dependencies, not touched in iter1;
-                // plugin_provided_assets — managed by a plugin, not orphans.
+                // plugin_provided_assets — managed/declared by a plugin (Tier A
+                // `@type file` params, profiles): not orphans;
+                // runtime_loaded_assets — referenced by a literal plugin load call:
+                // also not orphans (but they do NOT suppress `broken-assets`).
                 key.kind != AssetKind::Effect
                     && !referenced.contains(*key)
                     && !ctx.ir.plugin_provided_assets.contains(*key)
+                    && !ctx.ir.runtime_loaded_assets.contains(*key)
             })
             .collect();
         // Deterministic order for stable snapshots.

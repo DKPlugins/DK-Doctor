@@ -161,6 +161,14 @@ pub struct Ir {
     /// does not raise an error on them, and `orphan-assets` does not count them
     /// as orphans.
     pub plugin_provided_assets: FxHashSet<AssetKey>,
+    /// Assets a plugin only **references** at runtime via a literal call such as
+    /// `ImageManager.loadPicture("X")` / `AudioManager.playSe({name:"Y"})`. These
+    /// are real references (so `orphan-assets` does not count them as orphans),
+    /// but unlike [`plugin_provided_assets`] they do **not** make a missing file
+    /// non-broken — the call would still crash if the file is absent. Kept
+    /// separate so an attacker-controlled enabled plugin cannot hide a genuine
+    /// `broken-assets` finding by embedding a literal load of the missing name.
+    pub runtime_loaded_assets: FxHashSet<AssetKey>,
     /// All asset reference sites.
     pub asset_refs: Vec<(AssetKey, Location)>,
     /// Plugin metadata (Tier A): load order, command registry, dependencies.
@@ -238,6 +246,7 @@ pub struct IrBuilder {
     start_map_id: Option<u32>,
     assets_present: FxHashSet<AssetKey>,
     plugin_provided_assets: FxHashSet<AssetKey>,
+    runtime_loaded_assets: FxHashSet<AssetKey>,
     asset_refs: Vec<(AssetKey, Location)>,
     plugin_meta: PluginMeta,
     plugin_command_calls: Vec<(PluginCommandCall, Location)>,
@@ -264,6 +273,7 @@ impl IrBuilder {
             start_map_id: None,
             assets_present: FxHashSet::default(),
             plugin_provided_assets: FxHashSet::default(),
+            runtime_loaded_assets: FxHashSet::default(),
             asset_refs: Vec::new(),
             plugin_meta: PluginMeta::default(),
             plugin_command_calls: Vec::new(),
@@ -310,6 +320,15 @@ impl IrBuilder {
     /// count it as an orphan.
     pub fn add_plugin_provided_asset(&mut self, key: AssetKey) {
         self.plugin_provided_assets.insert(key);
+    }
+
+    /// Marks an asset as merely **referenced** by a plugin at runtime (a literal
+    /// `ImageManager.loadPicture("X")` / `AudioManager.playSe({name:"Y"})` call).
+    /// `orphan-assets` treats it as referenced (not orphan); `broken-assets` does
+    /// NOT consult this set — a missing file is still broken even if a plugin
+    /// calls a load for it.
+    pub fn add_runtime_loaded_asset(&mut self, key: AssetKey) {
+        self.runtime_loaded_assets.insert(key);
     }
 
     /// Sets the plugin metadata (Tier A).
@@ -484,6 +503,7 @@ impl IrBuilder {
             db,
             assets_present: self.assets_present,
             plugin_provided_assets: self.plugin_provided_assets,
+            runtime_loaded_assets: self.runtime_loaded_assets,
             asset_refs: self.asset_refs,
             plugin_meta: self.plugin_meta,
             plugin_command_calls: self.plugin_command_calls,

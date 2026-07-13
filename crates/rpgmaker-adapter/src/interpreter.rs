@@ -11,7 +11,7 @@ use dk_doctor_core::ir::{
     AssetKey, AssetKind, CmpOp, DbKind, DeadBranch, Edge, EntityId, IrBuilder, Location, PathSeg,
     PluginCommandCall, SelfSwitchKey, Site, SwitchGate, TransferDesignation,
 };
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 /// An inclusive integer range `[lo, hi]` a variable is statically known to hold.
 /// An exact constant is the degenerate range `lo == hi`. All arithmetic saturates
@@ -376,6 +376,43 @@ fn picture_lifecycle(b: &mut IrBuilder, ctx: &WalkCtx, list: &[EventCommand]) {
     if first_show.is_empty() {
         return;
     }
+    // Precompute the two O(N) guards the per-op loop used to recompute as O(N)
+    // scans (→ O(N²) on a list of N "Move Picture #1" before one "Show"). Both
+    // are derived from a single forward pass over the list.
+    //
+    // `in_loop[i]` — whether index i sits inside an open loop body (net `112`
+    // Loop minus `413` Repeat Above, counted from the prefix before i), mirroring
+    // the old `inside_loop` semantics.
+    //
+    // `next_shallower[i]` — closest j > i with `list[j].indent < list[i].indent`
+    // (usize::MAX if none), via a monotonic stack. The old per-op check "any
+    // command in (i..show_idx) dedents below cmd.indent" is then a single O(1)
+    // comparison: `next_shallower[i] < show_idx`.
+    let mut in_loop = vec![false; list.len()];
+    {
+        let mut depth: i32 = 0;
+        for (i, c) in list.iter().enumerate() {
+            in_loop[i] = depth > 0;
+            if c.code == codes::LOOP {
+                depth += 1;
+            } else if c.code == codes::REPEAT_ABOVE {
+                depth -= 1;
+            }
+        }
+    }
+    let mut next_shallower = vec![usize::MAX; list.len()];
+    {
+        let mut stack: Vec<usize> = Vec::with_capacity(list.len());
+        for (i, c) in list.iter().enumerate() {
+            while let Some(&top) = stack.last()
+                && list[top].indent > c.indent
+            {
+                next_shallower[top] = i;
+                stack.pop();
+            }
+            stack.push(i);
+        }
+    }
     for (i, cmd) in list.iter().enumerate() {
         let op = match cmd.code {
             codes::MOVE_PICTURE => PictureOp::Move,
@@ -395,7 +432,7 @@ fn picture_lifecycle(b: &mut IrBuilder, ctx: &WalkCtx, list: &[EventCommand]) {
         }
         // Loop back-edge: an op inside a loop body may run after a prior iteration's
         // Show (the picture persists), so it is not operating on a missing picture.
-        if inside_loop(list, i) {
+        if in_loop[i] {
             continue;
         }
         // Same execution path: equal indent, and no command between them dedents
@@ -403,10 +440,7 @@ fn picture_lifecycle(b: &mut IrBuilder, ctx: &WalkCtx, list: &[EventCommand]) {
         if cmd.indent != list[show_idx].indent {
             continue;
         }
-        if list[(i + 1)..show_idx]
-            .iter()
-            .any(|c| c.indent < cmd.indent)
-        {
+        if next_shallower[i] < show_idx {
             continue;
         }
         b.add_picture_misuse(PictureMisuse {
@@ -415,21 +449,6 @@ fn picture_lifecycle(b: &mut IrBuilder, ctx: &WalkCtx, list: &[EventCommand]) {
             location: ctx.loc(i as u32),
         });
     }
-}
-
-/// Whether the command at `idx` sits inside an open loop body (net `112` Loop minus
-/// `413` Repeat Above before it is positive). Used by [`picture_lifecycle`] to spare
-/// erase/redraw-in-loop idioms, where the picture persists across iterations.
-fn inside_loop(list: &[EventCommand], idx: usize) -> bool {
-    let mut depth: i32 = 0;
-    for c in &list[..idx] {
-        if c.code == codes::LOOP {
-            depth += 1;
-        } else if c.code == codes::REPEAT_ABOVE {
-            depth -= 1;
-        }
-    }
-    depth > 0
 }
 
 fn interpret(b: &mut IrBuilder, ctx: &WalkCtx, cmd: &EventCommand, idx: u32, env: &mut ConstEnv) {
@@ -734,7 +753,12 @@ fn picture_position_var_reads(b: &mut IrBuilder, ctx: &WalkCtx, cmd: &EventComma
 /// digit index is a statically-known read. A nested form `\v[\v[3]]` contributes
 /// the inner literal (3) — the outer index is dynamic and skipped, exactly the
 /// order the engine resolves them. Id `0` (placeholder) is ignored.
-pub(crate) fn collect_text_var_ids(text: &str, out: &mut Vec<u32>) {
+///
+/// `out` keeps the first-seen order for callers; `seen` is the O(1) membership
+/// guard so a crafted line with many unique escapes (`\v[1]\v[2]…\v[N]`) stays
+/// O(N) instead of degrading to O(N²) via `Vec::contains`. Both must originate
+/// from the same accumulator (clear/pass them together).
+pub(crate) fn collect_text_var_ids(text: &str, out: &mut Vec<u32>, seen: &mut HashSet<u32>) {
     let bytes = text.as_bytes();
     let mut i = 0;
     while i < bytes.len() {
@@ -750,7 +774,7 @@ pub(crate) fn collect_text_var_ids(text: &str, out: &mut Vec<u32>) {
             if k > start && bytes.get(k) == Some(&b']') {
                 if let Ok(n) = text[start..k].parse::<u32>()
                     && n != 0
-                    && !out.contains(&n)
+                    && seen.insert(n)
                 {
                     out.push(n);
                 }
@@ -766,7 +790,8 @@ pub(crate) fn collect_text_var_ids(text: &str, out: &mut Vec<u32>) {
 fn message_text_reads(b: &mut IrBuilder, ctx: &WalkCtx, text: Option<&str>, idx: u32) {
     let Some(text) = text else { return };
     let mut ids = Vec::new();
-    collect_text_var_ids(text, &mut ids);
+    let mut seen = HashSet::new();
+    collect_text_var_ids(text, &mut ids, &mut seen);
     for id in ids {
         read_var(b, ctx, id, idx);
     }
@@ -776,8 +801,9 @@ fn message_text_reads(b: &mut IrBuilder, ctx: &WalkCtx, text: Option<&str>, idx:
 /// `102` Show Choices command (`parameters[0]` = array of strings).
 fn choice_text_reads(b: &mut IrBuilder, ctx: &WalkCtx, cmd: &EventCommand, idx: u32) {
     let mut ids = Vec::new();
+    let mut seen = HashSet::new();
     for s in cmd.as_str_array(0) {
-        collect_text_var_ids(s, &mut ids);
+        collect_text_var_ids(s, &mut ids, &mut seen);
     }
     for id in ids {
         read_var(b, ctx, id, idx);

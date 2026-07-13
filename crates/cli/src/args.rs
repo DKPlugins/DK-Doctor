@@ -89,6 +89,15 @@ pub struct Args {
     #[arg(long, value_name = "PATH")]
     pub config: Option<Utf8PathBuf>,
 
+    /// Treat the project as UNTRUSTED input: do not auto-load the project's
+    /// `.dk-doctor.toml` (so its `fail_on`/`disable`/`[[suppress]]` cannot bypass
+    /// the CI gate) and ignore its `.dk-doctor/` directory (curated plugin
+    /// profiles, `config.toml` ignore-globs — which can hide findings). Use this
+    /// in CI that scans third-party game projects or untrusted archives. An
+    /// explicit `--config` is still honored (it is an operator-controlled path).
+    #[arg(long = "no-project-config")]
+    pub no_project_config: bool,
+
     /// CI gate: which findings make the process exit non-zero. Overrides the
     /// config. Without it, the legacy exit code is used (2 errors / 1 warnings / 0).
     #[arg(long = "fail-on", value_enum)]

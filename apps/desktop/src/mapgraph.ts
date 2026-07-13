@@ -19,6 +19,19 @@ const GAP_Y = 78;
 const PAD = 28;
 /** Above this node count the layout is skipped (too dense to read usefully). */
 export const GRAPH_MAX_NODES = 400;
+/**
+ * Edge cap: a graph with more edges is considered unrenderable. Defends against a
+ * crafted project whose single valid map has thousands of Transfer-Player
+ * commands (each a distinct edge) — without this, the missing-target band would
+ * bypass {@link GRAPH_MAX_NODES} and freeze the renderer.
+ */
+export const GRAPH_MAX_EDGES = 20_000;
+/**
+ * Cap on the "missing target" band (broken-transfer stubs). Beyond this the extra
+ * stubs are dropped from the SVG (the header count still reports the true total);
+ * 20k dashed-red nodes in the DOM would otherwise freeze the view.
+ */
+export const GRAPH_MAX_MISSING = 400;
 
 /** Summary counts for the graph header. */
 export interface GraphStats {
@@ -170,7 +183,7 @@ export function renderMapGraph(graph: MapGraph, opts: GraphRenderOpts): string {
     if (ids.length) bands.push({ ids, kind: "layer" });
   }
   if (islands.length) bands.push({ ids: islands.slice().sort((a, b) => a - b), kind: "island" });
-  const missingIds = [...missing].sort((a, b) => a - b);
+  const missingIds = [...missing].sort((a, b) => a - b).slice(0, GRAPH_MAX_MISSING);
   if (missingIds.length) bands.push({ ids: missingIds, kind: "missing" });
 
   // Assign positions row by row, centering each row within the widest one.
@@ -267,7 +280,11 @@ export function renderMapGraph(graph: MapGraph, opts: GraphRenderOpts): string {
 
 /** Whether a graph is small enough to lay out (see {@link GRAPH_MAX_NODES}). */
 export function graphIsRenderable(graph: MapGraph): boolean {
-  return graph.nodes.length > 0 && graph.nodes.length <= GRAPH_MAX_NODES;
+  return (
+    graph.nodes.length > 0 &&
+    graph.nodes.length <= GRAPH_MAX_NODES &&
+    graph.edges.length <= GRAPH_MAX_EDGES
+  );
 }
 
 /** Convenience: total distinct edges for the header (already deduped by adapter). */

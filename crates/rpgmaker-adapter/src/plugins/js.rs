@@ -364,6 +364,29 @@ fn prototype_method(t: &[Tok], i: usize) -> Option<(String, usize)> {
     Some((format!("{cls}.prototype.{m}"), i + 2))
 }
 
+/// Whether an identifier immediately before `(` is a control-flow / operator
+/// keyword rather than a callable. Used to tell `if (…` / `return (…` (a group,
+/// NOT an alias save) from `foo(…` / `…)(…` (a call argument, an alias save).
+fn is_control_flow_keyword(s: &str) -> bool {
+    matches!(
+        s,
+        "if" | "while"
+            | "for"
+            | "switch"
+            | "with"
+            | "catch"
+            | "return"
+            | "function"
+            | "typeof"
+            | "void"
+            | "new"
+            | "in"
+            | "of"
+            | "do"
+            | "else"
+    )
+}
+
 /// Scans literal global switch/var writes (`$gameSwitches/$gameVariables.setValue(N, …)`).
 fn scan_setvalue(t: &[Tok], switches: &mut Vec<u32>, variables: &mut Vec<u32>) {
     for i in 0..t.len() {
@@ -712,13 +735,37 @@ pub fn analyze_plugin(src: &str) -> PluginJsFacts {
                 // `X.prototype.m = …` — an assignment.
                 assigned.push(method);
             } else {
-                // Any occurrence of `X.prototype.m` that is NOT the direct target
-                // of `=` reads the original → an alias/save-site. Beyond the plain
-                // `IDENT = X.prototype.m` idiom this also covers the IIFE-wrapper
-                // form `X.prototype.m = (function(o){…})(X.prototype.m)` and
-                // `.call`/`.apply` chains, so a real alias is not misread as an
-                // overwrite (false plugin-conflict).
-                saved.insert(method);
+                // A reference to the original `X.prototype.m` is a save-site only
+                // when it is CAPTURED — i.e. the token before the class is `=`
+                // (assignment RHS, incl. `IDENT = X.prototype.m`), `,` (array/arg
+                // list), or `(` (call argument, incl. the IIFE-wrapper
+                // `(function(o){…})(X.prototype.m)`). A bare read or feature-check
+                // (`if (X.prototype.m) {}`, `X.prototype.m && …`) is NOT a save:
+                // counting it would force `overwrites = false` for the later
+                // assignment and hide a real `plugin-conflict`. Here `i` is the
+                // `prototype` token, so the class sits at `i-2`, the token before
+                // it at `i-3`, and (for the `(` case) the token before the paren
+                // at `i-4`.
+                let before_class = if i >= 3 { t.get(i - 3) } else { None };
+                let is_capture = match before_class {
+                    Some(Tok::Eq) | Some(Tok::Comma) => true,
+                    Some(Tok::LParen) => {
+                        // Distinguish a call argument `)(…)` / `ident(…` from a
+                        // control-flow group `if (…`, `return (…`: only a callable
+                        // end (RParen/RBracket) or a non-keyword identifier makes
+                        // the paren a call.
+                        let before_paren = if i >= 4 { t.get(i - 4) } else { None };
+                        match before_paren {
+                            Some(Tok::RParen) | Some(Tok::RBracket) => true,
+                            Some(Tok::Id(name)) => !is_control_flow_keyword(name),
+                            _ => false,
+                        }
+                    }
+                    _ => false,
+                };
+                if is_capture {
+                    saved.insert(method);
+                }
             }
         }
     }
@@ -807,6 +854,28 @@ mod tests {
             .find(|(m, _)| m == "Scene_Map.prototype.update")
             .unwrap();
         assert!(!upd.1, "IIFE-wrapper сохраняет оригинал → не перетирает");
+    }
+
+    #[test]
+    fn feature_check_read_is_not_a_save_site() {
+        // A bare guard/read of the original (`if (X.prototype.m) {}`, `… && …`)
+        // must NOT count as a save. Otherwise the later assignment would be
+        // classified `overwrites = false` and a real `plugin-conflict` hidden —
+        // a hostile plugin can smuggle in such a guard on purpose.
+        let src = r#"
+            if (Game_Battler.prototype.gainHp) { /* feature-check */ }
+            Game_Battler.prototype.gainHp = function(v) { /* real overwrite */ };
+        "#;
+        let f = analyze_plugin(src);
+        let gain = f
+            .patches
+            .iter()
+            .find(|(m, _)| m == "Game_Battler.prototype.gainHp")
+            .unwrap();
+        assert!(
+            gain.1,
+            "a feature-check read is not an alias save → must be an overwrite"
+        );
     }
 
     #[test]
