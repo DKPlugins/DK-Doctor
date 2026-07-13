@@ -806,12 +806,6 @@ svg {
   flex-direction: column;
   gap: 14px;
 }
-.welcome__eyebrow {
-  font: var(--weight-semibold) var(--text-2xs)/1 var(--font-mono);
-  letter-spacing: 0.14em;
-  text-transform: uppercase;
-  color: var(--text-muted);
-}
 .welcome h1 {
   font: var(--weight-bold) clamp(1.9rem, 3.6vw, 2.6rem)/1.06 var(--font-sans);
   letter-spacing: -0.03em;
@@ -2271,6 +2265,7 @@ svg {
 .drawer__foot {
   flex: none;
   display: flex;
+  flex-wrap: wrap;
   align-items: center;
   gap: 8px;
   padding: 13px 16px;
@@ -2280,8 +2275,14 @@ svg {
 .drawer__foot .btn {
   flex: none;
 }
+/* The hide-reason chooser keeps a `flex:1` spacer to right-align its buttons;
+   the default footer drops the spacer (it would eat a whole wrapped line) and
+   pins the trailing ignore button with a margin instead. */
 .drawer__foot .grow {
   flex: 1;
+}
+.drawer__foot [data-act="ignore"] {
+  margin-left: auto;
 }
 
 /* ===========================================================================

@@ -258,7 +258,6 @@ export function welcomeHTML(s: State): string {
     `<div class="welcome__brand"><span class="welcome__mark">${icon("stethoscope")}</span>` +
     '<span class="welcome__wm"><span class="pr">▸</span><span class="dk">dk</span>-doctor</span></div>' +
     '<div class="welcome__copy">' +
-    `<span class="welcome__eyebrow">${esc(t(lang, "wEyebrow"))}</span>` +
     `<h1>${esc(t(lang, "wTitle"))}</h1>` +
     `<p class="welcome__lead">${esc(t(lang, "wLead"))}</p></div>` +
     '<div class="welcome__drop" id="drop">' +
@@ -1224,7 +1223,6 @@ export function drawerHTML(s: State): string {
       `<button class="btn btn--secondary btn--md" data-act="copy">${icon("copy")} ${esc(t(lang, "copyPath"))}</button>` +
       docsBtn +
       `<button class="btn btn--ghost btn--md" data-act="report-fp">${icon("megaphone")} ${esc(t(lang, "reportFp"))}</button>` +
-      '<span class="grow"></span>' +
       `<button class="iconbtn" data-act="ignore" title="${esc(t(lang, "ignore"))}" aria-label="${esc(t(lang, "ignore"))}">${icon("eye-off")}</button></div>`;
 
   return head + body + foot;
@@ -1290,7 +1288,7 @@ export function settingsHTML(s: State): string {
     `<div class="settings__field"><span class="settings__label">${esc(t(lang, "secData"))}</span>` +
     `<button class="btn btn--secondary btn--md" data-act="clear-recent">${icon("trash-2")} ${esc(t(lang, "recentClear"))}</button></div>` +
     // about
-    `<div class="settings__about"><span>${esc(t(lang, "aboutOffline"))}</span><span class="v">v0.1.0</span></div>` +
+    `<div class="settings__about"><span class="v">v${esc(s.appVersion ?? "0.2.0")}</span></div>` +
     "</div>"
   );
 }
@@ -1424,7 +1422,6 @@ export function sharePayload(s: State): string {
   return buildFeedback({
     report: s.report,
     version: s.appVersion ?? "?",
-    lang: s.lang,
     finding: s.shareFinding,
     ignored: s.ignored,
     warnings: s.warnings,

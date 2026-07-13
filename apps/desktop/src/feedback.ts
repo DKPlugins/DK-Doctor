@@ -9,7 +9,7 @@
  * fingerprint) plus the engine and app version — never map/event contents,
  * images, audio, plugin source, or absolute filesystem paths.
  */
-import type { Finding, Lang, Report } from "./api";
+import type { Finding, Report } from "./api";
 
 /** Fixed GitHub target the user pastes into. Plain https, no query — the
  *  backend `open_url` guard rejects `&` and long URLs, so we never prefill. */
@@ -75,7 +75,6 @@ function findingBlock(f: Finding): string {
 export interface FeedbackOpts {
   report: Report;
   version: string;
-  lang: Lang;
   /** When set, only this finding index is included (a false-positive report). */
   finding?: number | null;
   /** Indices the user hid — excluded from the whole-report payload. */
@@ -84,11 +83,11 @@ export interface FeedbackOpts {
   warnings?: string[];
 }
 
-/** Human note appended so the maintainer knows exactly what was (not) shared. */
-function footer(lang: Lang): string {
-  return lang === "ru"
-    ? "_Отправлено из DK-Doctor. Только метаданные находок (правило, сообщение, относительные пути). Без содержимого карт, изображений, аудио, исходников плагинов и абсолютных путей._"
-    : "_Sent from DK-Doctor. Finding metadata only (rule, message, relative paths). No map contents, images, audio, plugin source, or absolute paths._";
+/** Human note appended so the maintainer knows exactly what was (not) shared.
+ *  Always English: the payload lands in a public GitHub issue body, where a
+ *  fixed language reads better than a per-locale mix. */
+function footer(): string {
+  return "_Sent from DK-Doctor. Finding metadata only (rule, message, relative paths). No map contents, images, audio, plugin source, or absolute paths._";
 }
 
 /**
@@ -96,31 +95,27 @@ function footer(lang: Lang): string {
  * report with a prompt for the reason; otherwise the whole report minus the
  * findings the user hid (`ignored`), with the summary counts matching.
  * Returns "" only when the requested finding is missing.
+ *
+ * The payload is intentionally English regardless of the UI language: it is
+ * meant for a public issue tracker, so mixing locales inside one block (as the
+ * earlier `lang`-switched version did) reads worse than a consistent tongue.
  */
 export function buildFeedback(o: FeedbackOpts): string {
-  const { report, version, lang } = o;
+  const { report, version } = o;
   const engine = report.engine.toUpperCase();
 
   if (o.finding != null) {
     const f = report.findings[o.finding];
     if (!f) return "";
-    const title =
-      lang === "ru"
-        ? "### DK-Doctor — возможное ложное срабатывание"
-        : "### DK-Doctor — possible false positive";
-    const ask =
-      lang === "ru"
-        ? "> Почему это ложное срабатывание? (опишите здесь)"
-        : "> Why is this a false positive? (describe here)";
     return [
-      title,
+      "### DK-Doctor — possible false positive",
       `app ${version} · engine ${engine}`,
       "",
       findingBlock(f),
       "",
-      ask,
+      "> Why is this a false positive? (describe here)",
       "",
-      footer(lang),
+      footer(),
       "",
     ].join("\n");
   }
@@ -128,7 +123,7 @@ export function buildFeedback(o: FeedbackOpts): string {
   const visible = report.findings.filter((_, i) => !o.ignored?.has(i));
   const count = (sev: string) => visible.filter((f) => f.severity === sev).length;
   const parts: string[] = [
-    lang === "ru" ? "### Отчёт DK-Doctor" : "### DK-Doctor report",
+    "### DK-Doctor report",
     `app ${version} · engine ${engine} · ${count("error")} error / ${count("warning")} warning / ${count("info")} info`,
     "",
   ];
@@ -137,13 +132,16 @@ export function buildFeedback(o: FeedbackOpts): string {
 
   const warns = (o.warnings ?? []).map(sanitizePath).filter(Boolean);
   if (warns.length) {
-    const head =
-      lang === "ru"
-        ? `<details><summary>Пропущенные файлы (${warns.length})</summary>`
-        : `<details><summary>Skipped files (${warns.length})</summary>`;
-    parts.push(head, "", warns.slice(0, 50).map((w) => `- ${w}`).join("\n"), "", "</details>", "");
+    parts.push(
+      `<details><summary>Skipped files (${warns.length})</summary>`,
+      "",
+      warns.slice(0, 50).map((w) => `- ${w}`).join("\n"),
+      "",
+      "</details>",
+      "",
+    );
   }
 
-  parts.push(footer(lang), "");
+  parts.push(footer(), "");
   return parts.join("\n");
 }
