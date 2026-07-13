@@ -254,6 +254,10 @@ const RU: Dict = {
   minAgo: "мин назад",
   hAgo: "ч назад",
   dAgo: "дн назад",
+  // changelog overlay
+  changelog: "История изменений",
+  changelogTitle: "История изменений",
+  changelogCurrent: "текущая",
 };
 
 const EN: Dict = {
@@ -482,6 +486,10 @@ const EN: Dict = {
   minAgo: "m ago",
   hAgo: "h ago",
   dAgo: "d ago",
+  // changelog overlay
+  changelog: "Changelog",
+  changelogTitle: "Changelog",
+  changelogCurrent: "current",
 };
 
 const TABLE: Record<Lang, Dict> = { ru: RU, en: EN };

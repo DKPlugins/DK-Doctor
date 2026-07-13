@@ -44,7 +44,7 @@ transfer at an existing map, or create the missing one. Confidence: `certain`
 Detects a boat/ship/airship whose **start map (System.json) is missing**. The
 vehicle never spawns and cannot be boarded. Set an existing start map, or reposition
 the vehicle in-game with a *Set Vehicle Location* (202) command. Confidence:
-`certain`.
+`likely`.
 
 ## unreachable-maps
 

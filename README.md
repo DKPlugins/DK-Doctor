@@ -53,8 +53,9 @@ cargo run -p dk-doctor -- --format json "/path/to/project"
 ```
 
 Useful flags: `--format console|json`, `--lang ru|en` (report language; defaults to the OS locale — `ru*` → Russian,
-otherwise English), `--min-severity info|warning|error`, `--enable <rule>` / `--disable <rule>`, `--orphans` (enable
-the opt-in `orphan-assets` rule), `--fail-on <mode>` and `--baseline <file>` (CI gating — see below).
+otherwise English), `--min-severity info|warning|error`, `--enable <rule>` / `--disable <rule>`,
+`--orphans`, `--dead-common-events`, `--circular-gates`, `--tiles`, `--db-reachability`, `--pictures` (enable opt-in
+rules — see the table below), `--fail-on <mode>` and `--baseline <file>` (CI gating — see below).
 
 The console and JSON reports are multilingual. JSON additionally emits each finding's language-neutral
 `message_key` + structured `args`, a stable `fingerprint`, and the rendered `message`, so downstream tooling can
@@ -73,6 +74,10 @@ min_severity = "warning"        # info | warning | error  (display filter)
 disable      = ["orphan-assets"]
 orphans      = false            # enable the opt-in orphan-assets rule
 dead_common_events = false      # enable the opt-in dead-common-event rule
+circular_gates = false          # enable the opt-in circular-gate rule
+tiles        = false            # enable the opt-in blocked-tile rule
+pictures     = false            # enable the opt-in picture-lifecycle rule
+db_reachability = false         # enable the opt-in db-reachability rule
 
 # CI gate: which findings make the process exit non-zero.
 #   never | error | warning | all | new
@@ -139,6 +144,11 @@ Data & control flow:
 | `unreachable-maps` | info | certain | map with no incoming (direct) transfer |
 | `dead-common-event` | info | certain | common event never triggered or called — **opt-in** (`--dead-common-events`) |
 | `orphan-assets` | info | certain | asset present but referenced nowhere — **opt-in** (`--orphans`), noisy on stock RTP |
+| `empty-event-page` | warning/info | likely | an empty autorun page (soft-lock) or an empty parallel page |
+| `circular-gate` | warning | likely | switches that mutually block each other → progression dead-end — **opt-in** (`--circular-gates`) |
+| `blocked-tile` | warning | likely | Transfer Player / player start on a tile impassable from all sides — **opt-in** (`--tiles`) |
+| `picture-lifecycle` | warning | likely | a picture operated on (Move/Rotate/Tint/Erase) before it is shown — **opt-in** (`--pictures`) |
+| `db-reachability` | info | likely | a DB record (enemy/skill/weapon/armor) referenced nowhere — **opt-in** (`--db-reachability`) |
 
 Plugins (`js/plugins`):
 
@@ -167,6 +177,34 @@ crates/core              dk-doctor-core      — IR + rules engine + findings (e
 crates/rpgmaker-adapter  dk-doctor-rpgmaker  — parses /data + interprets commands → IR
 crates/cli               dk-doctor           — the binary: walk a project, run rules, render the report
 ```
+
+## What it does NOT catch
+
+dk-doctor is deterministic and static — it never runs the game. That buys speed and privacy, but it draws a line. To
+set honest expectations, here is what it does **not** detect (each is a known gap, not an oversight):
+
+- **Encrypted or non-standard `data/*.json`** projects are not analyzed (some engines/protectors obfuscate the data).
+- **MV raw plugin commands** (`code 356`) are not checked — only MZ structured commands (`357`) feed `unknown-plugin-command`.
+- **Self-switches set by a plugin/script** with a computed or foreign key (`$gameSelfSwitches.setValue`) are opaque —
+  `unreachable-self-switch` only tracks the current-event idiom.
+- **Common events reserved dynamically** (a computed id, or via a plugin struct parameter) are not visible — only a
+  literal `$gameTemp.reserveCommonEvent(n)` is tracked, which is why `dead-common-event` is opt-in.
+- **Switches turned on by plugin commands** (`356`/`357`) are not tracked — affects `circular-gate`.
+- **Variable-based transfers** are resolved only within one command list (constant propagation), not across events.
+- **Plugin-based passability** (region passage, pixel movement) and `through` events are not accounted for — affects
+  `blocked-tile`, which is opt-in for this reason.
+- **Pictures shown from another event or a script** cannot be seen statically — affects `picture-lifecycle`.
+- **Database references from plugins or notetags** are not tracked — affects `db-reachability` and `orphan-assets`.
+- **Text escape codes** `\n[id]` (actor name), `\p[idx]` (party), `\i[icon]` (icon) are not validated; only `\v[n]` is
+  parsed (as a variable read).
+- **Troop members, `Map.encounterList`, and actor/class `initialEquips`** references are not covered yet.
+- **VisuMZ `struct<>[]` array parameters** are deferred (a known false-positive minefield).
+- **No SARIF output** yet (`--format console|json` only).
+- **No probabilistic/AI layer** — two confidence levels only (`certain` / `likely`); everything is reproducible.
+
+When a rule would be mostly noise on a category like this, it ships **off by default** (an opt-in flag) rather than
+firing blindly. The rule set grows by real reports — see [CONTRIBUTING.md](CONTRIBUTING.md) to report misses and false
+positives.
 
 ## Desktop app (Tauri v2)
 
