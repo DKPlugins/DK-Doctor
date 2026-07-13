@@ -3486,6 +3486,121 @@ svg {
   height: 18px;
 }
 
+/* --- Share / feedback overlay --- */
+.share {
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+}
+.share__intro {
+  margin: 0;
+  font: var(--weight-medium) var(--text-sm)/1.5 var(--font-sans);
+  color: var(--text);
+}
+.share__cols {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 10px;
+}
+.share__col {
+  padding: 12px 14px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  background: var(--surface);
+}
+.share__col--ok {
+  border-color: var(--sev-info-bg);
+}
+.share__ct {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  font: var(--weight-semibold) var(--text-xs)/1 var(--font-sans);
+  color: var(--text);
+  margin-bottom: 8px;
+}
+.share__ct svg {
+  width: 15px;
+  height: 15px;
+  color: var(--brand);
+}
+.share__col--no .share__ct svg {
+  color: var(--text-faint);
+}
+.share__list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+.share__list li {
+  display: flex;
+  align-items: flex-start;
+  gap: 7px;
+  font: var(--weight-medium) var(--text-xs)/1.4 var(--font-sans);
+  color: var(--text-muted);
+}
+.share__list li svg {
+  flex: none;
+  width: 13px;
+  height: 13px;
+  margin-top: 1px;
+}
+.share__col--ok .share__list li svg {
+  color: var(--sev-info);
+}
+.share__col--no .share__list li svg {
+  color: var(--text-faint);
+}
+.share__pt {
+  font: var(--weight-semibold) var(--text-xs)/1 var(--font-sans);
+  color: var(--text-muted);
+}
+.share__preview {
+  width: 100%;
+  resize: vertical;
+  padding: 10px 12px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  background: var(--surface-sunken);
+  color: var(--text);
+  font: var(--weight-regular) var(--text-xs)/1.5 var(--font-mono, monospace);
+  white-space: pre;
+  overflow: auto;
+}
+.share__steps {
+  display: flex;
+  gap: 10px;
+}
+.share__steps .btn {
+  flex: 1;
+  justify-content: center;
+}
+.share__hint {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  margin: 0;
+  font: var(--weight-medium) var(--text-xs)/1.5 var(--font-sans);
+  color: var(--text-muted);
+}
+.share__hint svg {
+  flex: none;
+  width: 15px;
+  height: 15px;
+  margin-top: 1px;
+  color: var(--brand);
+}
+.drawer__foot--why {
+  flex-wrap: wrap;
+}
+.drawer__foot--why .whylabel {
+  font: var(--weight-semibold) var(--text-xs)/1 var(--font-sans);
+  color: var(--text);
+}
+
 /* --- Map graph (D6) --- */
 .mapgraph {
   min-height: 0;
