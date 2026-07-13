@@ -217,6 +217,5 @@ h3.cat{margin:14px 0 6px;font-size:12px;text-transform:uppercase;letter-spacing:
 </div>
 <ul class="gates">${gates}</ul>
 ${findingsHtml}
-<div class="foot">${esc(t(lang, "aboutOffline"))}</div>
 </div></div></body></html>`;
 }
